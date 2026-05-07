@@ -2,7 +2,7 @@
 import asyncio
 import sys
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -96,7 +96,7 @@ def _submit(cmd: list[str], background: BackgroundTasks) -> dict:
         "cmd": cmd,
         "stdout": "",
         "stderr": "",
-        "created_at": datetime.utcnow().isoformat(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
     }
     background.add_task(_run_job, job_id, cmd)
     return {"job_id": job_id, "status": "pending"}
