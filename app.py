@@ -8,7 +8,7 @@ from typing import List, Optional
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 ROOT_DIR = Path(__file__).resolve().parent
 
@@ -64,6 +64,12 @@ class FullRequest(BaseModel):
     skip_pre_pipeline: bool = False
     skip_qa_gen: bool = False
     skip_post_pipeline: bool = False
+
+    @model_validator(mode="after")
+    def require_crops_or_crops_file(self) -> "FullRequest":
+        if not self.crops and not self.crops_file:
+            raise ValueError("either 'crops' or 'crops_file' must be provided")
+        return self
 
 
 # --- Job runner ---
@@ -226,7 +232,7 @@ def list_outputs():
 @app.get("/files/outputs/{path:path}")
 def download_output(path: str):
     target = (ROOT_DIR / "outputs" / path).resolve()
-    if not str(target).startswith(str((ROOT_DIR / "outputs").resolve())):
+    if not target.is_relative_to((ROOT_DIR / "outputs").resolve()):
         raise HTTPException(status_code=400, detail="invalid path")
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
