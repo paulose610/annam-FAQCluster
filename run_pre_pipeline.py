@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""
+run_pre_pipeline.py — Pre-Pipeline: State filter + Crop normalization
+
+Prepares a raw KCC CSV for the main pipeline by:
+  1. Filter  — keep only rows for the specified state (get_state_crop_rows.py)
+  2. Normalize — map raw crop variants to canonical names, drop others (crop_normalizer.py)
+
+Usage:
+    python run_pre_pipeline.py \\
+        --input  zoho_raw.csv \\
+        --state  Karnataka \\
+        --crops  Cotton Sugarcane "Sugar Beet" \\
+        --output karna_norm.csv
+
+Output:
+    <output>  — normalized CSV ready to pass as --raw-file to run_pipeline.py / run_full.py
+"""
+
+import sys
+import subprocess
+import argparse
+import textwrap
+from pathlib import Path
+from datetime import datetime
+
+SCRIPT_DIR        = Path(__file__).resolve().parent
+PRE_PIPELINE_DIR  = SCRIPT_DIR / 'pre_pipeline'
+
+
+def banner(msg: str):
+    width = 66
+    print(f"\n{'═' * width}")
+    print(f"  {msg}")
+    print(f"{'═' * width}")
+
+
+def run_state_filter(input_path: Path, state: str, intermediate: Path):
+    banner("Stage 1/2 — State Filter")
+    cmd = [
+        sys.executable,
+        str(PRE_PIPELINE_DIR / 'get_state_crop_rows.py'),
+        '--input',  str(input_path),
+        '--state',  state,
+        '--output', str(intermediate),
+    ]
+    print(f"  Input  : {input_path}")
+    print(f"  State  : {state}")
+    print(f"  Output : {intermediate}")
+    subprocess.run(cmd, check=True)
+    print(f"\n  ✓ State filter complete")
+
+
+def run_crop_normalizer(intermediate: Path, output_path: Path, crops: list[str]):
+    banner("Stage 2/2 — Crop Normalization")
+    cmd = [
+        sys.executable,
+        str(PRE_PIPELINE_DIR / 'crop_normalizer.py'),
+        '--input',  str(intermediate),
+        '--output', str(output_path),
+        '--crops',  *crops,
+    ]
+    print(f"  Primary crops : {', '.join(crops)}")
+    print(f"  Output        : {output_path}")
+    subprocess.run(cmd, check=True)
+    print(f"\n  ✓ Crop normalization complete")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        prog='run_pre_pipeline.py',
+        description=textwrap.dedent("""\
+            Pre-pipeline runner: filter by state then normalize crop names.
+            Produces a clean CSV ready for the main FAQ pipeline.
+        """),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument('--input',  required=True,
+                        help='Raw KCC CSV file (e.g. zoho_downloaded_file.csv)')
+    parser.add_argument('--state',  required=True,
+                        help='State name to filter rows by (e.g. Karnataka)')
+    parser.add_argument('--crops',  required=True, nargs='+', metavar='CROP',
+                        help='Primary crop names to keep and normalize '
+                             '(e.g. Cotton Sugarcane "Sugar Beet")')
+    parser.add_argument('--output', required=True,
+                        help='Path for the final normalized CSV output')
+    parser.add_argument('--keep-intermediate', action='store_true',
+                        help='Keep the state-filtered intermediate CSV (do not delete it)')
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    input_path  = Path(args.input).resolve()
+    output_path = Path(args.output).resolve()
+
+    if not input_path.exists():
+        sys.exit(f"ERROR: input file not found: {input_path}")
+
+    # Intermediate file sits alongside the output, cleaned up on success
+    intermediate = output_path.parent / f"{output_path.stem}_state_rows.csv"
+
+    start_time = datetime.now()
+    banner("KCC FAQ Pre-Pipeline")
+    print(f"  Input    : {input_path}")
+    print(f"  State    : {args.state}")
+    print(f"  Crops    : {', '.join(args.crops)}")
+    print(f"  Output   : {output_path}")
+    print(f"  Started  : {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+
+    run_state_filter(input_path, args.state, intermediate)
+    run_crop_normalizer(intermediate, output_path, args.crops)
+
+    if intermediate.exists() and not args.keep_intermediate:
+        intermediate.unlink()
+
+    elapsed = datetime.now() - start_time
+    banner("Pre-Pipeline Complete!")
+    print(f"  Output  : {output_path}")
+    print(f"  Elapsed : {elapsed}")
+    print()
+
+
+if __name__ == '__main__':
+    main()
