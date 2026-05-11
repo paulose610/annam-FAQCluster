@@ -41,8 +41,8 @@ import textwrap
 from pathlib import Path
 from datetime import datetime
 
-SCRIPT_DIR   = Path(__file__).resolve().parent          # kcc_faq/
-PIPELINE_DIR = SCRIPT_DIR / 'pipeline'                 # kcc_faq/pipeline/
+SCRIPT_DIR   = Path(__file__).resolve().parent       # kcc_faq/
+PIPELINE_DIR = SCRIPT_DIR / 'pipeline'               # kcc_faq/pipeline/
 # Corpus config is local to this folder — no external project dependency
 DEFAULT_CORPUS = SCRIPT_DIR / 'config' / 'irrelevant_corpus.yaml'
 sys.path.insert(0, str(SCRIPT_DIR))  # so `from pipeline.X import Y` works
@@ -216,7 +216,9 @@ def run_unique_questions(args, out_dir: Path):
         ]
 
     print(f"  Running: {' '.join(cmd[:6])} ...")
-    result = subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout, end="")
     print(f"\n  ✓ Unique question extraction complete")
 
 
@@ -233,7 +235,9 @@ def run_dedup(out_dir: Path):
         '--output', str(freq_csv),
         '--drop-rank',
     ]
-    subprocess.run(cmd, check=True)
+    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+    if result.stdout:
+        print(result.stdout, end="")
     print(f"\n  ✓ Dedup complete — final FAQ: {freq_csv}")
 
 
