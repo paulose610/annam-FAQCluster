@@ -91,7 +91,10 @@ def run_phase1(args, out_dir: Path):
         print(f"  Sampled: {args.max_queries}")
 
     print("\n  Loading sentence transformer...")
-    model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+    model = SentenceTransformer(
+        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        device=f"cuda:{args.gpu_id}",
+    )
     stop_words = load_stopwords()
     configs = generate_param_grid(mode=args.grid_mode)
 
@@ -145,7 +148,10 @@ def run_repair(args, out_dir: Path, candidates: list, best_cfg: str):
 
     # Step A: diverse reps
     print(f"\n  [A] Loading sentence transformer for embeddings...")
-    st_model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+    st_model = SentenceTransformer(
+        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        device=f"cuda:{args.gpu_id}",
+    )
     texts    = result.df['query_text'].tolist()
     import numpy as np
     all_embs = st_model.encode(

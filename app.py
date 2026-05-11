@@ -24,7 +24,7 @@ if str(ROOT_DIR) not in sys.path:
 
 EXECUTOR = ThreadPoolExecutor()
 
-app = FastAPI(title="FAQCluster API")
+app = FastAPI(title="FAQCluster API", redirect_slashes=False)
 
 jobs: dict[str, dict] = {}
 
