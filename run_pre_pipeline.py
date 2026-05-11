@@ -35,6 +35,15 @@ def banner(msg: str):
     print(f"{'═' * width}")
 
 
+def _stream(cmd: list) -> None:
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    proc.wait()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
+
+
 def run_state_filter(input_path: Path, state: str, intermediate: Path):
     banner("Stage 1/2 — State Filter")
     cmd = [
@@ -47,7 +56,7 @@ def run_state_filter(input_path: Path, state: str, intermediate: Path):
     print(f"  Input  : {input_path}")
     print(f"  State  : {state}")
     print(f"  Output : {intermediate}")
-    subprocess.run(cmd, check=True)
+    _stream(cmd)
     print(f"\n  ✓ State filter complete")
 
 
@@ -62,7 +71,7 @@ def run_crop_normalizer(intermediate: Path, output_path: Path, crops: list[str])
     ]
     print(f"  Primary crops : {', '.join(crops)}")
     print(f"  Output        : {output_path}")
-    subprocess.run(cmd, check=True)
+    _stream(cmd)
     print(f"\n  ✓ Crop normalization complete")
 
 

@@ -586,7 +586,7 @@ def run_phase1(raw_csv: Path, crop: str, grid_mode: str,
         df['query_text'] = df['QueryText'] if 'QueryText' in df.columns else df.iloc[:, 8]
 
     # Flexible crop filter (strips parentheses)
-    raw_crop_norm = df['Crop'].str.replace(r'[\(\)]', '', regex=True).str.strip()
+    raw_crop_norm = df['Crop'].str.replace(r'[\(\)]', '', regex=True).str.strip()  
     crop_norm     = re.sub(r'[\(\)]', '', crop).strip()
     df = df[raw_crop_norm == crop_norm].copy()
     print(f"  Rows for '{crop}': {len(df)}")

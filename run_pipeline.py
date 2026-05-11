@@ -400,7 +400,8 @@ def main():
     out_base = Path(args.output_dir)
     if not out_base.is_absolute():
         out_base = project_root / out_base
-    out_dir = out_base / slug(args.crop)
+    state_folder = Path(args.raw_file).stem  # e.g. "maharashtra_norm"
+    out_dir = out_base / state_folder / slug(args.crop)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = datetime.now()

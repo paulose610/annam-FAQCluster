@@ -92,7 +92,7 @@ class PreRequest(BaseModel):
 
 class PipelineRequest(BaseModel):
     raw_file: str
-    crop: str
+    crops: List[str]
     output_dir: str = "outputs/repair"
     model: str = "../models/qwen2.5-7b-instruct"
     api_key: Optional[str] = None
@@ -227,51 +227,65 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
         DEFAULT_CORPUS,
     )
 
-    args = argparse.Namespace(
-        raw_file           = str(_resolve_safe(r.raw_file)),
-        crop               = r.crop,
-        model              = r.model,
-        api_key            = r.api_key,
-        gpu_id             = r.gpu_id,
-        batch_size         = r.batch_size,
-        grid_mode          = r.grid_mode,
-        skip_phase1        = r.skip_phase1,
-        skip_phase2        = r.skip_phase2,
-        skip_repair        = r.skip_repair,
-        skip_unique_q      = r.skip_unique_q,
-        skip_corpus_filter = r.skip_corpus_filter,
-        skip_qa_gen        = r.skip_qa_gen,
-        max_queries        = 20000,
-        phase2_top_k       = 5,
-        coverage_cap       = 0.80,
-        diverse_k          = 3,
-        coherence_flag     = 'C',
-        merge_sim          = 0.82,
-        corpus_file        = str(DEFAULT_CORPUS),
-        fuzz_threshold     = 100,
-        output_dir         = r.output_dir,
-    )
+    resolved_raw = str(_resolve_safe(r.raw_file))
+    state_folder = Path(r.raw_file).stem  # e.g. "maharashtra_norm" from "data/maharashtra_norm.csv"
+    out_base     = _resolve_safe(r.output_dir) / state_folder
+    failed       = []
 
-    out_dir = _resolve_safe(r.output_dir) / slug(args.crop)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    for crop in r.crops:
+        args = argparse.Namespace(
+            raw_file           = resolved_raw,
+            crop               = crop,
+            model              = r.model,
+            api_key            = r.api_key,
+            gpu_id             = r.gpu_id,
+            batch_size         = r.batch_size,
+            grid_mode          = r.grid_mode,
+            skip_phase1        = r.skip_phase1,
+            skip_phase2        = r.skip_phase2,
+            skip_repair        = r.skip_repair,
+            skip_unique_q      = r.skip_unique_q,
+            skip_corpus_filter = r.skip_corpus_filter,
+            skip_qa_gen        = r.skip_qa_gen,
+            max_queries        = 20000,
+            phase2_top_k       = 5,
+            coverage_cap       = 0.80,
+            diverse_k          = 3,
+            coherence_flag     = 'C',
+            merge_sim          = 0.82,
+            corpus_file        = str(DEFAULT_CORPUS),
+            fuzz_threshold     = 100,
+            output_dir         = str(out_base),
+        )
 
-    candidates = load_candidates(out_dir) if args.skip_phase1 else run_phase1(args, out_dir)
-    best_cfg   = load_best_cfg(out_dir, candidates) if args.skip_phase2 else run_phase2(args, out_dir, candidates)
+        out_dir = out_base / slug(crop)
+        out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not args.skip_repair:
-        run_repair(args, out_dir, candidates, best_cfg)
-    if not args.skip_unique_q:
-        run_unique_questions(args, out_dir)
+        try:
+            candidates = load_candidates(out_dir) if args.skip_phase1 else run_phase1(args, out_dir)
+            best_cfg   = load_best_cfg(out_dir, candidates) if args.skip_phase2 else run_phase2(args, out_dir, candidates)
 
-    run_dedup(out_dir)
+            if not args.skip_repair:
+                run_repair(args, out_dir, candidates, best_cfg)
+            if not args.skip_unique_q:
+                run_unique_questions(args, out_dir)
 
-    if not args.skip_corpus_filter:
-        corpus_path = Path(args.corpus_file)
-        if corpus_path.exists():
-            run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+            run_dedup(out_dir)
 
-    if not args.skip_qa_gen:
-        run_qa_gen(args, out_dir)
+            if not args.skip_corpus_filter:
+                corpus_path = Path(args.corpus_file)
+                if corpus_path.exists():
+                    run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+
+            if not args.skip_qa_gen:
+                run_qa_gen(args, out_dir)
+
+        except (SystemExit, Exception) as exc:
+            print(f"[WARN] Crop '{crop}' failed: {exc}")
+            failed.append(crop)
+
+    if failed:
+        raise RuntimeError(f"The following crops failed: {', '.join(failed)}")
 
 
 def _run_post_sync(r: PostRequest) -> None:
@@ -336,7 +350,8 @@ def _run_full_sync(r: FullRequest) -> None:
         effective_raw = str(norm_file)
 
     # Per-crop pipeline
-    out_base = _resolve_safe(r.output_dir)
+    state_folder = Path(effective_raw).stem  # e.g. "tamilnadu_norm"
+    out_base     = _resolve_safe(r.output_dir) / state_folder
     failed = []
     for crop in crops:
         args = argparse.Namespace(
