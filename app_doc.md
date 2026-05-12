@@ -194,10 +194,8 @@ If any crops fail, raises `RuntimeError` at the end listing them (marks job `"fa
 | POST | `/run/full` | — | Submit full end-to-end job |
 | GET | `/jobs` | — | List all jobs |
 | GET | `/jobs/{job_id}` | — | Get one job (404 if not found) |
-| GET | `/files/outputs` | — | List files under `app-data/outputs/` |
-| GET | `/files/outputs/{path}` | — | Download file from `app-data/outputs/` |
-| GET | `/files/root` | — | List CSVs in `app-data/` |
-| GET | `/files/root/{filename}` | — | Download a CSV from `app-data/` |
+| GET | `/files/tree` | — | Curated directory structure (all_csvs, crop_qa_files, final_csvs) |
+| GET | `/files/download/{path}` | — | Download any file by relative path inside `app-data/` |
 
 ---
 

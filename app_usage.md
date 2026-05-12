@@ -183,21 +183,27 @@ Returns an array of all job records.
 
 ## File endpoints
 
-### List output files — `GET /files/outputs`
+### Directory tree — `GET /files/tree`
 
-Returns relative paths of all files under `outputs/`.
+Returns a curated view of `app-data/` with three sections:
 
-### Download an output file — `GET /files/outputs/{path}`
+- `all_csvs` — every CSV except under `outputs/repair/` and `final/`
+- `crop_qa_files` — `unique_questions_freq_qa.csv` per crop, with `crop` and `state` fields
+- `final_csvs` — every CSV under `final/{state}/`, with a `state` field
 
-Streams the file. Path is relative to `outputs/` (e.g. `repair/wheat/final.csv`).
+Each entry has `name`, `path` (relative to `app-data/`), and `size`. Use `path` with the download endpoint below.
 
-### List root CSVs — `GET /files/root`
+### Download a file — `GET /files/download/{path}`
 
-Returns filenames of `.csv` files in the project root directory.
+Streams any file by its path relative to `app-data/`. Use the `path` field from `/files/tree` directly.
 
-### Download a root CSV — `GET /files/root/{filename}`
+```
+GET /files/download/data/raw.csv
+GET /files/download/outputs/repair/punjab/maize/unique_questions_freq_qa.csv
+GET /files/download/final/punjab/final_qa.csv
+```
 
-Streams the file. Only `.csv` files with no path separators are allowed.
+Returns 404 if not found, 400 if the path escapes `app-data/`.
 
 ---
 
@@ -209,6 +215,6 @@ POST /run/full          # kick off everything for a state
 
 GET /jobs/abc           # poll until status == "done" or "failed"
 
-GET /files/outputs      # browse results
-GET /files/outputs/repair/wheat/final_qa.csv   # download
+GET /files/tree         # browse curated results
+GET /files/download/outputs/repair/wheat/unique_questions_freq_qa.csv   # download
 ```

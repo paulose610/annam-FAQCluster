@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -448,35 +448,108 @@ def get_job(job_id: str):
 
 # --- File endpoints ---
 
-@app.get("/files/outputs")
-def list_outputs():
-    outputs_dir = APP_DATA / "outputs"
-    if not outputs_dir.exists():
-        return []
-    return [str(p.relative_to(APP_DATA)) for p in outputs_dir.rglob("*") if p.is_file()]
-
-
-@app.get("/files/outputs/{path:path}")
-def download_output(path: str):
-    outputs_root = (APP_DATA / "outputs").resolve()
-    target = (outputs_root / path).resolve()
-    if not target.is_relative_to(outputs_root):
-        raise HTTPException(status_code=400, detail="invalid path")
+@app.get("/files/download/{path:path}")
+def download_file(path: str):
+    target = _resolve_safe(path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(str(target), filename=target.name)
 
 
-@app.get("/files/root")
-def list_root_csvs():
-    return [p.name for p in APP_DATA.iterdir() if p.is_file() and p.suffix == ".csv"]
+@app.get("/files/tree")
+def app_data_tree():
+    """
+    Filtered view of app-data for the frontend. Returns three sections:
+    - all_csvs: every CSV in app-data except inside outputs/repair/ and final/
+    - crop_qa_files: unique_questions_freq_qa.csv per crop in outputs/repair/{state}/{crop}/
+    - final_csvs: every CSV in app-data/final/{state}/
+    Each entry has a 'path' usable with GET /files/download/{path}.
+    """
+    def _file_entry(p: Path) -> dict:
+        return {
+            "name": p.name,
+            "path": str(p.relative_to(APP_DATA)),
+            "size": p.stat().st_size,
+        }
+
+    outputs_dir = APP_DATA / "outputs"
+    repair_dir = outputs_dir / "repair"
+    final_root = APP_DATA / "final"
+
+    all_csvs = []
+    if APP_DATA.exists():
+        for p in APP_DATA.rglob("*.csv"):
+            try:
+                p.relative_to(outputs_dir)
+                continue
+            except ValueError:
+                pass
+            try:
+                p.relative_to(final_root)
+                continue
+            except ValueError:
+                pass
+            all_csvs.append(_file_entry(p))
+    all_csvs.sort(key=lambda e: e["path"])
+
+    crop_qa_files = []
+    if repair_dir.exists():
+        for qa_file in sorted(repair_dir.rglob("unique_questions_freq_qa.csv")):
+            crop_slug = qa_file.parent.name
+            state_name = qa_file.parent.parent.name
+            entry = _file_entry(qa_file)
+            entry["crop"] = crop_slug
+            entry["state"] = state_name
+            crop_qa_files.append(entry)
+
+    final_csvs = []
+    if final_root.exists():
+        for p in sorted(final_root.rglob("*.csv")):
+            state_name = p.parent.name
+            entry = _file_entry(p)
+            entry["state"] = state_name
+            final_csvs.append(entry)
+
+    return {
+        "all_csvs": all_csvs,
+        "crop_qa_files": crop_qa_files,
+        "final_csvs": final_csvs,
+    }
 
 
-@app.get("/files/root/{filename}")
-def download_root_csv(filename: str):
-    if "/" in filename or not filename.endswith(".csv"):
-        raise HTTPException(status_code=400, detail="invalid filename")
-    target = APP_DATA / filename
+@app.delete("/files/{path:path}")
+def delete_file(path: str):
+    target = _resolve_safe(path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
-    return FileResponse(str(target), filename=filename)
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail="path is a directory")
+    target.unlink()
+    return {"deleted": path}
+
+
+@app.post("/files/upload")
+async def upload_file(dest: str = "", file: UploadFile = File(...)):
+    if dest:
+        _resolve_safe(dest)
+        save_dir = (APP_DATA / dest).resolve()
+    else:
+        save_dir = APP_DATA
+    save_dir.mkdir(parents=True, exist_ok=True)
+    target = (save_dir / file.filename).resolve()
+    if not target.is_relative_to(APP_DATA.resolve()):
+        raise HTTPException(status_code=400, detail="path escapes sandbox")
+    content = await file.read()
+    target.write_bytes(content)
+    return {"uploaded": str(target.relative_to(APP_DATA))}
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] == "running":
+        raise HTTPException(status_code=409, detail="cannot delete a running job")
+    del jobs[job_id]
+    return {"deleted": job_id}
