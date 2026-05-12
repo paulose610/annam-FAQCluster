@@ -210,6 +210,7 @@ def _run_pre_sync(r: PreRequest) -> None:
     if not input_path.exists():
         raise FileNotFoundError(f"input file not found: {input_path}")
 
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     intermediate = output_path.parent / f"{output_path.stem}_state_rows.csv"
 
     run_state_filter(input_path, r.state, intermediate)
