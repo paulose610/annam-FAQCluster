@@ -31,6 +31,11 @@ SCRIPT_DIR        = Path(__file__).resolve().parent
 POST_PIPELINE_DIR = SCRIPT_DIR / 'post_pipeline'
 sys.path.insert(0, str(SCRIPT_DIR))
 
+try:
+    import _job_ctl as _ctl
+except ImportError:
+    _ctl = None
+
 
 def banner(msg: str):
     width = 66
@@ -47,7 +52,14 @@ def run_collect(input_dir: Path) -> Path:
         '--input', str(input_dir),
     ]
     print(f"  Input dir : {input_dir}")
-    subprocess.run(cmd, check=True)
+    proc = subprocess.Popen(cmd, text=True)
+    if _ctl:
+        _ctl.register_proc(proc)
+    proc.wait()
+    if _ctl:
+        _ctl.deregister_proc()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
     final_dir = input_dir / 'final'
     print(f"\n  ✓ Collect complete — files in: {final_dir}")
     return final_dir

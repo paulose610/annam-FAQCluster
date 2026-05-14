@@ -49,6 +49,11 @@ export async function deleteJob(jobId) {
   return _handleResponse(res);
 }
 
+export async function stopJob(jobId) {
+  const res = await fetch(`/jobs/${jobId}/stop`, { method: 'POST' });
+  return _handleResponse(res);
+}
+
 export async function runPre(body) {
   const res = await fetch('/run/pre', {
     method: 'POST',

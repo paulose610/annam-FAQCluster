@@ -1,6 +1,5 @@
 import { useRef } from 'react';
 import { Upload } from 'lucide-react';
-import styles from './FilesPanel.module.css';
 import FileGroup from './FileGroup.jsx';
 import { uploadFile } from '../../api.js';
 
@@ -28,17 +27,22 @@ export default function FilesPanel({ fileTree, onRefresh }) {
   }
 
   return (
-    <div className={styles.panel}>
+    <div className="flex flex-col h-full">
       <input
         ref={inputRef}
         type="file"
         style={{ display: 'none' }}
         onChange={handleFileChange}
       />
-      <button className={styles.uploadBtn} onClick={handleUploadClick}>
-        <Upload size={14} />
-        Upload file
-      </button>
+      <div className="p-2 border-b border-border">
+        <button
+          className="w-full flex items-center gap-2 px-3 py-2 border border-dashed border-border rounded-md text-sm text-muted-foreground bg-input hover:border-primary hover:bg-primary/5 hover:text-primary transition-colors"
+          onClick={handleUploadClick}
+        >
+          <Upload size={14} />
+          Upload file
+        </button>
+      </div>
       <FileGroup
         label="Input CSVs"
         files={fileTree.all_csvs || []}

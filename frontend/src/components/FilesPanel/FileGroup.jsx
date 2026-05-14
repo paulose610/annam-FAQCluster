@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import { ChevronDown, ChevronRight, Folder } from 'lucide-react';
-import styles from './FilesPanel.module.css';
 import FileRow from './FileRow.jsx';
 
 function buildTree(files) {
@@ -27,15 +26,15 @@ function TreeNode({ name, node, depth, onDeleted }) {
     <>
       {name && (
         <div
-          className={styles.folderRow}
-          style={{ paddingLeft: `${indent}px` }}
+          className="flex items-center gap-1 py-1 text-xs text-muted-foreground cursor-pointer hover:bg-accent transition-colors"
+          style={{ paddingLeft: `${indent}px`, paddingRight: '8px' }}
           onClick={() => setOpen((v) => !v)}
         >
-          <span className={styles.chevron}>
+          <span className="text-muted-foreground/60 flex-shrink-0">
             {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </span>
-          <Folder size={12} style={{ flexShrink: 0, color: '#94a3b8' }} />
-          <span>{name}</span>
+          <Folder size={12} className="flex-shrink-0 text-muted-foreground/60" />
+          <span className="truncate">{name}</span>
         </div>
       )}
       {open && (
@@ -67,11 +66,15 @@ function SubGroup({ label, files, onDeleted }) {
   const [open, setOpen] = useState(true);
   return (
     <>
-      <div className={styles.subGroupHeader} onClick={() => setOpen((v) => !v)}>
-        <span className={styles.chevron}>
+      <div
+        className="flex items-center gap-1 px-3 py-1 text-xs text-muted-foreground cursor-pointer hover:bg-accent transition-colors"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="text-muted-foreground/60 flex-shrink-0">
           {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
-        <span>{label}</span>
+        <Folder size={12} className="flex-shrink-0 text-muted-foreground/60" />
+        <span className="truncate">{label}</span>
       </div>
       {open &&
         files.map((file) => (
@@ -88,7 +91,7 @@ export default function FileGroup({ label, files, onDeleted, groupBy, showPath =
   if (open) {
     if (showPath) {
       if (files.length === 0) {
-        content = <div className={styles.emptyGroup}>No files</div>;
+        content = <div className="px-4 py-2 text-xs text-muted-foreground/60 italic">No files</div>;
       } else {
         const tree = buildTree(files);
         content = <TreeNode name={null} node={tree} depth={0} onDeleted={onDeleted} />;
@@ -102,7 +105,7 @@ export default function FileGroup({ label, files, onDeleted, groupBy, showPath =
       }
       const keys = Object.keys(groups).sort();
       if (keys.length === 0) {
-        content = <div className={styles.emptyGroup}>No files</div>;
+        content = <div className="px-4 py-2 text-xs text-muted-foreground/60 italic">No files</div>;
       } else {
         content = keys.map((k) => (
           <SubGroup key={k} label={k} files={groups[k]} onDeleted={onDeleted} />
@@ -110,7 +113,7 @@ export default function FileGroup({ label, files, onDeleted, groupBy, showPath =
       }
     } else {
       if (files.length === 0) {
-        content = <div className={styles.emptyGroup}>No files</div>;
+        content = <div className="px-4 py-2 text-xs text-muted-foreground/60 italic">No files</div>;
       } else {
         content = files.map((file) => (
           <FileRow key={file.path} file={file} onDeleted={onDeleted} />
@@ -121,11 +124,14 @@ export default function FileGroup({ label, files, onDeleted, groupBy, showPath =
 
   return (
     <>
-      <div className={styles.groupHeader} onClick={() => setOpen((v) => !v)}>
-        <span className={styles.chevron}>
+      <div
+        className="flex items-center gap-1.5 px-3 py-2 cursor-pointer bg-muted hover:bg-accent transition-colors border-y border-border"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="text-muted-foreground/60 flex-shrink-0">
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
-        <span className={styles.groupLabel}>{label}</span>
+        <span className="text-xs font-semibold text-foreground/70 uppercase tracking-wider">{label}</span>
       </div>
       {content}
     </>

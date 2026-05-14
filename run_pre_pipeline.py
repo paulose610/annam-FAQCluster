@@ -27,6 +27,11 @@ from datetime import datetime
 SCRIPT_DIR        = Path(__file__).resolve().parent
 PRE_PIPELINE_DIR  = SCRIPT_DIR / 'pre_pipeline'
 
+try:
+    import _job_ctl as _ctl
+except ImportError:
+    _ctl = None
+
 
 def banner(msg: str):
     width = 66
@@ -37,9 +42,13 @@ def banner(msg: str):
 
 def _stream(cmd: list) -> None:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if _ctl:
+        _ctl.register_proc(proc)
     for line in proc.stdout:
         print(line, end="", flush=True)
     proc.wait()
+    if _ctl:
+        _ctl.deregister_proc()
     if proc.returncode != 0:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 

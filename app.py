@@ -22,11 +22,15 @@ APP_DATA.mkdir(exist_ok=True)
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
+import _job_ctl
+
 EXECUTOR = ThreadPoolExecutor()
 
 app = FastAPI(title="FAQCluster API", redirect_slashes=False)
 
 jobs: dict[str, dict] = {}
+
+JOB_TYPE_IDS: dict[str, int] = {"pre": 1, "pipeline": 2, "post": 3, "full": 4}
 
 _tl = threading.local()
 
@@ -162,41 +166,70 @@ async def _run_job(job_id: str, fn: Callable[[], None]) -> None:
 
     def _wrapped():
         _tl.job_id = job_id
+        _job_ctl.set_job_id(job_id)
         try:
             fn()
         finally:
             _tl.job_id = None
+            _job_ctl.set_job_id(None)
+            _job_ctl.deregister_proc()
 
     try:
         await loop.run_in_executor(EXECUTOR, _wrapped)
-        jobs[job_id]["status"] = "done"
-        jobs[job_id]["stderr"] = ""
+        if _job_ctl.is_cancelled(job_id):
+            jobs[job_id]["status"] = "stopped"
+            jobs[job_id]["stderr"] = "stopped by user"
+        else:
+            jobs[job_id]["status"] = "done"
+            jobs[job_id]["stderr"] = ""
     except SystemExit as exc:
         code = exc.code if exc.code is not None else 0
-        jobs[job_id]["status"] = "done" if code == 0 else "failed"
-        jobs[job_id]["stderr"] = f"SystemExit({code}): {code}"
+        if _job_ctl.is_cancelled(job_id):
+            jobs[job_id]["status"] = "stopped"
+            jobs[job_id]["stderr"] = "stopped by user"
+        else:
+            jobs[job_id]["status"] = "done" if code == 0 else "failed"
+            jobs[job_id]["stderr"] = f"SystemExit({code}): {code}"
     except subprocess.CalledProcessError as exc:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["stderr"] = (
-            f"CalledProcessError (returncode={exc.returncode}): "
-            f"{exc.cmd!r}\n{traceback.format_exc()}"
-        )
+        if _job_ctl.is_cancelled(job_id):
+            jobs[job_id]["status"] = "stopped"
+            jobs[job_id]["stderr"] = "stopped by user"
+        else:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["stderr"] = (
+                f"CalledProcessError (returncode={exc.returncode}): "
+                f"{exc.cmd!r}\n{traceback.format_exc()}"
+            )
     except Exception:
-        jobs[job_id]["status"] = "failed"
-        jobs[job_id]["stderr"] = traceback.format_exc()
+        if _job_ctl.is_cancelled(job_id):
+            jobs[job_id]["status"] = "stopped"
+            jobs[job_id]["stderr"] = "stopped by user"
+        else:
+            jobs[job_id]["status"] = "failed"
+            jobs[job_id]["stderr"] = traceback.format_exc()
+    finally:
+        _job_ctl.cleanup(job_id)
 
 
-def _submit(fn: Callable[[], None], background: BackgroundTasks) -> dict:
+def _submit(fn: Callable[[], None], background: BackgroundTasks, job_type: str) -> dict:
     job_id = str(uuid.uuid4())
+    _job_ctl.make_event(job_id)
     jobs[job_id] = {
         "job_id": job_id,
+        "job_type": job_type,
+        "job_type_id": JOB_TYPE_IDS[job_type],
         "status": "pending",
         "stdout": "",
         "stderr": "",
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     background.add_task(_run_job, job_id, fn)
-    return {"job_id": job_id, "status": "pending"}
+    return {
+        "job_id": job_id,
+        "job_type": job_type,
+        "job_type_id": JOB_TYPE_IDS[job_type],
+        "status": "pending",
+    }
 
 
 # --- Sync pipeline wrappers (run in ThreadPoolExecutor) ---
@@ -416,22 +449,22 @@ def health():
 
 @app.post("/run/pre")
 def run_pre(req: PreRequest, background: BackgroundTasks):
-    return _submit(lambda: _run_pre_sync(req), background)
+    return _submit(lambda: _run_pre_sync(req), background, "pre")
 
 
 @app.post("/run/pipeline")
 def run_pipeline(req: PipelineRequest, background: BackgroundTasks):
-    return _submit(lambda: _run_pipeline_sync(req), background)
+    return _submit(lambda: _run_pipeline_sync(req), background, "pipeline")
 
 
 @app.post("/run/post")
 def run_post(req: PostRequest, background: BackgroundTasks):
-    return _submit(lambda: _run_post_sync(req), background)
+    return _submit(lambda: _run_post_sync(req), background, "post")
 
 
 @app.post("/run/full")
 def run_full(req: FullRequest, background: BackgroundTasks):
-    return _submit(lambda: _run_full_sync(req), background)
+    return _submit(lambda: _run_full_sync(req), background, "full")
 
 
 @app.get("/jobs")
@@ -543,6 +576,21 @@ async def upload_file(dest: str = "", file: UploadFile = File(...)):
     content = await file.read()
     target.write_bytes(content)
     return {"uploaded": str(target.relative_to(APP_DATA))}
+
+
+@app.post("/jobs/{job_id}/stop")
+def stop_job(job_id: str):
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job["status"] != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"job is not running (status={job['status']})",
+        )
+    _job_ctl.cancel(job_id)
+    jobs[job_id]["status"] = "stopped"
+    return {"job_id": job_id, "status": "stopped"}
 
 
 @app.delete("/jobs/{job_id}")

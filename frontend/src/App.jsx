@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
-import styles from './App.module.css';
+import { Toaster } from 'sonner';
 import Header from './components/Header.jsx';
 import FilesPanel from './components/FilesPanel/FilesPanel.jsx';
 import FunctionsPanel from './components/FunctionsPanel/FunctionsPanel.jsx';
 import JobsPanel from './components/JobsPanel/JobsPanel.jsx';
-import { getTree, getJobs, deleteJob } from './api.js';
+import { getTree, getJobs, deleteJob, stopJob } from './api.js';
 
 export default function App() {
   const [fileTree, setFileTree] = useState({ all_csvs: [], crop_qa_files: [], final_csvs: [] });
@@ -34,26 +34,46 @@ export default function App() {
       .catch((err) => console.error('Failed to delete job:', err));
   }
 
+  function handleStopJob(jobId) {
+    stopJob(jobId)
+      .then(() =>
+        setJobs((prev) =>
+          prev.map((j) => (j.job_id === jobId ? { ...j, status: 'stopped' } : j))
+        )
+      )
+      .catch((err) => console.error('Failed to stop job:', err));
+  }
+
   function handleFileDeleted() {
     getTree()
       .then(setFileTree)
       .catch((err) => console.error('Failed to refresh file tree:', err));
   }
 
+  const repairDirs = [...new Set((fileTree.crop_qa_files || []).map((f) => f.state))]
+    .sort()
+    .map((s) => ({ name: s, path: `outputs/repair/${s}` }));
+
   return (
-    <>
+    <div className="flex flex-col h-screen">
       <Header />
-      <div className={styles.body}>
-        <div className={styles.leftCol}>
+      <div className="flex flex-1 overflow-hidden">
+        <div className="w-60 flex-shrink-0 overflow-y-auto border-r border-border bg-card scrollbar-hide">
           <FilesPanel fileTree={fileTree} onRefresh={handleFileDeleted} />
         </div>
-        <div className={styles.centerCol}>
-          <FunctionsPanel allCsvs={fileTree.all_csvs} />
+        <div className="flex-1 overflow-y-auto p-4 bg-background">
+          <FunctionsPanel allCsvs={fileTree.all_csvs} repairDirs={repairDirs} />
         </div>
-        <div className={styles.rightCol}>
-          <JobsPanel jobs={jobs} onDeleteJob={handleDeleteJob} onRefresh={handleRefreshJobs} />
+        <div className="w-80 flex-shrink-0 overflow-y-auto border-l border-border bg-card scrollbar-hide">
+          <JobsPanel
+            jobs={jobs}
+            onDeleteJob={handleDeleteJob}
+            onStopJob={handleStopJob}
+            onRefresh={handleRefreshJobs}
+          />
         </div>
       </div>
-    </>
+      <Toaster richColors position="bottom-right" />
+    </div>
   );
 }

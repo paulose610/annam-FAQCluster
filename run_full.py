@@ -37,6 +37,11 @@ import textwrap
 from pathlib import Path
 from datetime import datetime
 
+try:
+    import _job_ctl as _ctl
+except ImportError:
+    _ctl = None
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -67,8 +72,13 @@ def run_pipeline_for_crop(args, crop: str) -> bool:
     if args.gpu_id is not None:
         env['CUDA_VISIBLE_DEVICES'] = str(args.gpu_id)
 
-    result = subprocess.run(cmd, env=env)
-    return result.returncode == 0
+    proc = subprocess.Popen(cmd, env=env)
+    if _ctl:
+        _ctl.register_proc(proc)
+    proc.wait()
+    if _ctl:
+        _ctl.deregister_proc()
+    return proc.returncode == 0
 
 
 def run_pre_pipeline(args, crops: list[str]) -> Path:
