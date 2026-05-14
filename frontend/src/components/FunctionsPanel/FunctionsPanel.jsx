@@ -1,6 +1,85 @@
 import RunTile from './RunTile.jsx';
 import { runPre, runPipeline, runPost, runFull } from '../../api.js';
 
+export const STATE_NAMES = [
+  'A And N Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam',
+  'Bihar', 'Chhattisgarh', 'Dadra And Nagar Haveli', 'Daman And Diu',
+  'Delhi', 'Goa', 'Gujarat', 'Haryana', 'Himachal Pradesh',
+  'Jammu And Kashmir', 'Jharkand', 'Karnataka', 'Kerala', 'Madhya Pradesh',
+  'Maharashtra', 'Manipur', 'Meghalaya', 'Mizoram', 'Nagaland', 'Odisha',
+  'Puducherry', 'Punjab', 'Rajasthan', 'Sikkim', 'Tamilnadu', 'Telangana',
+  'Tripura', 'Uttar Pradesh', 'Uttarakhand', 'West Bengal',
+].sort();
+
+export const DOMAIN_NAMES = [
+  'Abiotic Stress Management',
+  'Agriculture Mechanization',
+  'Bio-Pesticides and Bio-Fertilizers',
+  'Breeding -Inbreeding',
+  'Cold Storage',
+  'Credit',
+  'Crop Insurance',
+  'Cultural Practices',
+  'Disease',
+  'Disease (Bacterial)',
+  'Disease (Viral)',
+  'Disease - External Parasitic',
+  'Disease Management',
+  'Disease Reporting',
+  'Dosage',
+  'Feed',
+  'Fertilizer Use and Availability',
+  'Field Preparation',
+  'Floriculture',
+  'Harvesting Management',
+  'Horticulture',
+  'Hormone Imbalance Management',
+  'Hormonic Imbalance',
+  'Insect Management',
+  'Integrated Farming',
+  'Irrigation Management',
+  'Landscaping',
+  'Loans',
+  'Management',
+  'Medicinal and Aromatic Plants',
+  'Mushroom Production',
+  'Nursery Management',
+  'Nutrient Deficiency/Excessiveness Management',
+  'Nutrient Management',
+  'Old/Senile Orchard Rejuvenation',
+  'OldSenile Orchard Rejuvenation',
+  'Organic Farming',
+  'Pathogenic Disease Management',
+  'Plant Protection',
+  'Plasticulture',
+  'Post Harvest Management - Abiotic',
+  'Post Harvest Management - Biotic',
+  'Post Harvest Management Cleaning Grading Packaging Food Processing Cool Chain etc',
+  'Post Harvest Management (Cleaning, Grading, Packaging, Food Processing, Cool Chain etc.)',
+  'Post Harvest Preservation',
+  'Power Roads etc',
+  'Power, Roads etc.',
+  'Problem Of Soil',
+  'Seed Sowing And Treatment',
+  'Soil Health Card',
+  'Soil Testing',
+  'Sowing Time and Weather',
+  'Spices and Condiment Crops',
+  'Storage',
+  'Tank Pond and Reservoir Management',
+  'Tank, Pond and Reservoir Management',
+  'Training',
+  'Training and Exposure Visits',
+  'Varietal Selection',
+  'Varieties',
+  'Varities',
+  'Vegetative Propagation and Tissue Culture',
+  'Water Management',
+  'Water Management Micro Irrigation',
+  'Water Management, Micro Irrigation',
+  'Weed Management',
+].sort();
+
 export const CROP_NAMES = [
   'Acid Lime', 'Almond', 'Aloe Vera', 'Amaranthus', 'Aonla', 'Apple', 'Apricot',
   'Arecanut', 'Arum', 'Ash Gourd', 'Avocado', 'Babul', 'Bael', 'Banana',
@@ -51,16 +130,17 @@ const GRID_MODE_OPTIONS = [
 ];
 
 const PRE_FIELDS = [
-  { key: 'input',            label: 'Input CSV',        type: 'csv-dropdown' },
-  { key: 'state',            label: 'State',            type: 'text' },
+  { key: 'state',            label: 'State',            type: 'states-selector' },
   { key: 'crops',            label: 'Crops',            type: 'crops-selector' },
+  { key: 'domains',          label: 'Domains',          type: 'domains-selector' },
   { key: 'output',           label: 'Output path',      type: 'text' },
   { key: 'keep_intermediate',label: 'Keep intermediate',type: 'checkbox', defaultValue: true },
 ];
 
 const PIPELINE_FIELDS = [
-  { key: 'raw_file',  label: 'Raw file', type: 'csv-dropdown' },
+  { key: 'input',     label: 'Input CSV',type: 'csv-from-sidebar' },
   { key: 'crops',     label: 'Crops',    type: 'crops-selector' },
+  { key: 'domains',   label: 'Domains',  type: 'domains-selector' },
   {
     key: 'grid_mode', label: 'Grid mode', type: 'select',
     defaultValue: 'quick', options: GRID_MODE_OPTIONS,
@@ -78,9 +158,10 @@ const POST_FIELDS = [
 ];
 
 const FULL_FIELDS = [
-  { key: 'raw_file', label: 'Raw file', type: 'csv-dropdown' },
-  { key: 'state',    label: 'State',    type: 'text' },
-  { key: 'crops',    label: 'Crops',    type: 'crops-selector' },
+  { key: 'state',      label: 'State',                   type: 'states-selector' },
+  { key: 'crops',      label: 'Crops',                   type: 'crops-selector' },
+  { key: 'domains',    label: 'Domains',                 type: 'domains-selector' },
+  { key: 'pre_output', label: 'Pre-pipeline output path', type: 'text', defaultValue: '', hint: 'If left empty, no intermediate file will be saved to disk.' },
   {
     key: 'grid_mode', label: 'Grid mode', type: 'select',
     defaultValue: 'quick', options: GRID_MODE_OPTIONS,
@@ -90,7 +171,7 @@ const FULL_FIELDS = [
   { key: 'skip_post_pipeline', label: 'Skip post-pipeline', type: 'checkbox' },
 ];
 
-export default function FunctionsPanel({ allCsvs, repairDirs }) {
+export default function FunctionsPanel({ repairDirs, onRequestPick }) {
   return (
     <div className="grid grid-cols-2 gap-4 max-[700px]:grid-cols-1">
       <RunTile
@@ -98,25 +179,26 @@ export default function FunctionsPanel({ allCsvs, repairDirs }) {
         description="Filter state rows and normalise crop names"
         fields={PRE_FIELDS}
         onRun={runPre}
-        allCsvs={allCsvs}
         repairDirs={repairDirs}
         cropNames={CROP_NAMES}
+        domainNames={DOMAIN_NAMES}
+        stateNames={STATE_NAMES}
       />
       <RunTile
         title="Pipeline"
         description="Run the 7-stage clustering pipeline per crop"
         fields={PIPELINE_FIELDS}
         onRun={runPipeline}
-        allCsvs={allCsvs}
         repairDirs={repairDirs}
         cropNames={CROP_NAMES}
+        domainNames={DOMAIN_NAMES}
+        onRequestPick={onRequestPick}
       />
       <RunTile
         title="Post-Pipeline"
         description="Collect and deduplicate final outputs"
         fields={POST_FIELDS}
         onRun={runPost}
-        allCsvs={allCsvs}
         repairDirs={repairDirs}
         cropNames={CROP_NAMES}
       />
@@ -125,9 +207,10 @@ export default function FunctionsPanel({ allCsvs, repairDirs }) {
         description="Pre → pipeline → post in one shot"
         fields={FULL_FIELDS}
         onRun={runFull}
-        allCsvs={allCsvs}
         repairDirs={repairDirs}
         cropNames={CROP_NAMES}
+        domainNames={DOMAIN_NAMES}
+        stateNames={STATE_NAMES}
       />
     </div>
   );

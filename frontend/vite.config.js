@@ -5,10 +5,12 @@ import tailwindcss from '@tailwindcss/vite';
 export default defineConfig({
   plugins: [tailwindcss(), react()],
   server: {
+    host: true,
+    port: 8031,
     proxy: {
-      '/run': 'http://localhost:8000',
-      '/jobs': 'http://localhost:8000',
-      '/files': 'http://localhost:8000',
+      '/run': 'http://localhost:8030',
+      '/jobs': 'http://localhost:8030',
+      '/files': 'http://localhost:8030',
     },
   },
 });

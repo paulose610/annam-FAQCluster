@@ -26,6 +26,20 @@ export async function deleteFile(path) {
   return _handleResponse(res);
 }
 
+export async function renameFile(fromPath, toPath) {
+  const res = await fetch(`/files/rename/${fromPath}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to: toPath }),
+  });
+  return _handleResponse(res);
+}
+
+export async function deleteFolder(path) {
+  const res = await fetch(`/folders/${path}`, { method: 'DELETE' });
+  return _handleResponse(res);
+}
+
 export async function uploadFile(formData) {
   const res = await fetch('/files/upload', {
     method: 'POST',

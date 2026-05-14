@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 import uuid
@@ -81,22 +84,29 @@ def _resolve_safe(user_str: str) -> Path:
 # --- Pydantic models ---
 
 class PreRequest(BaseModel):
-    input: str
     state: str
-    crops: List[str]
+    crops: Optional[List[str]] = None
+    domains: Optional[List[str]] = None
     output: str
     keep_intermediate: bool = True
 
-    @field_validator("input", "output")
+    @field_validator("output")
     @classmethod
     def _safe_path(cls, v: str) -> str:
         _resolve_safe(v)
         return v
 
+    @model_validator(mode="after")
+    def require_crops_or_domains(self) -> "PreRequest":
+        if not self.crops and not self.domains:
+            raise ValueError("at least one of 'crops' or 'domains' must be provided")
+        return self
+
 
 class PipelineRequest(BaseModel):
-    raw_file: str
-    crops: List[str]
+    input: str = "cleaned_data.csv"
+    crops: Optional[List[str]] = None
+    domains: Optional[List[str]] = None
     output_dir: str = "outputs/repair"
     model: str = "../models/qwen2.5-7b-instruct"
     api_key: Optional[str] = None
@@ -110,7 +120,7 @@ class PipelineRequest(BaseModel):
     skip_corpus_filter: bool = False
     skip_qa_gen: bool = False
 
-    @field_validator("raw_file", "output_dir")
+    @field_validator("output_dir", "input")
     @classmethod
     def _safe_path(cls, v: str) -> str:
         _resolve_safe(v)
@@ -130,11 +140,12 @@ class PostRequest(BaseModel):
 
 
 class FullRequest(BaseModel):
-    raw_file: str
     state: str
     crops: Optional[List[str]] = None
     crops_file: Optional[str] = None
+    domains: Optional[List[str]] = None
     output_dir: str = "outputs/repair"
+    pre_output: Optional[str] = None
     model: str = "../models/qwen2.5-7b-instruct"
     api_key: Optional[str] = None
     gpu_id: int = 1
@@ -144,18 +155,12 @@ class FullRequest(BaseModel):
     skip_qa_gen: bool = False
     skip_post_pipeline: bool = False
 
-    @field_validator("raw_file", "output_dir", "crops_file")
+    @field_validator("output_dir", "crops_file", "pre_output")
     @classmethod
     def _safe_path(cls, v: Optional[str]) -> Optional[str]:
         if v is not None:
             _resolve_safe(v)
         return v
-
-    @model_validator(mode="after")
-    def require_crops_or_crops_file(self) -> "FullRequest":
-        if not self.crops and not self.crops_file:
-            raise ValueError("either 'crops' or 'crops_file' must be provided")
-        return self
 
 
 # --- Job runner ---
@@ -237,7 +242,7 @@ def _submit(fn: Callable[[], None], background: BackgroundTasks, job_type: str) 
 def _run_pre_sync(r: PreRequest) -> None:
     from run_pre_pipeline import run_state_filter, run_crop_normalizer
 
-    input_path  = _resolve_safe(r.input)
+    input_path  = APP_DATA / "cleaned_data.csv"
     output_path = _resolve_safe(r.output)
 
     if not input_path.exists():
@@ -246,8 +251,12 @@ def _run_pre_sync(r: PreRequest) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     intermediate = output_path.parent / f"{output_path.stem}_state_rows.csv"
 
-    run_state_filter(input_path, r.state, intermediate)
-    run_crop_normalizer(intermediate, output_path, r.crops)
+    run_state_filter(input_path, r.state, intermediate, domains=r.domains or [])
+    if r.crops:
+        run_crop_normalizer(intermediate, output_path, r.crops)
+    else:
+        import shutil
+        shutil.copy2(intermediate, output_path)
 
     if intermediate.exists() and not r.keep_intermediate:
         intermediate.unlink()
@@ -261,12 +270,28 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
         DEFAULT_CORPUS,
     )
 
-    resolved_raw = str(_resolve_safe(r.raw_file))
-    state_folder = Path(r.raw_file).stem  # e.g. "maharashtra_norm" from "data/maharashtra_norm.csv"
+    import pandas as pd
+
+    resolved_raw = str(APP_DATA / r.input)
+    state_folder = Path(r.input).stem
     out_base     = _resolve_safe(r.output_dir) / state_folder
     failed       = []
 
-    for crop in r.crops:
+    if r.crops or r.domains:
+        _df = pd.read_csv(resolved_raw, low_memory=False)
+        if r.crops:
+            _df = _df[_df["Crop"].dropna().str.strip().isin(r.crops)]
+        if r.domains:
+            _df = _df[_df["QueryType"].dropna().str.strip().isin(r.domains)]
+        crops = _df["Crop"].dropna().str.strip().unique().tolist()
+        print(f"[INFO] Filtered to {len(crops)} unique crop(s): {', '.join(crops)}")
+    else:
+        print("[INFO] No crops/domains provided — discovering unique crops from input CSV...")
+        _df = pd.read_csv(resolved_raw, low_memory=False)
+        crops = _df["Crop"].dropna().str.strip().unique().tolist()
+        print(f"[INFO] Found {len(crops)} unique crop(s): {', '.join(crops)}")
+
+    for crop in crops:
         args = argparse.Namespace(
             raw_file           = resolved_raw,
             crop               = crop,
@@ -356,27 +381,49 @@ def _run_full_sync(r: FullRequest) -> None:
     # Resolve crop list
     if r.crops:
         crops = r.crops
-    else:
+    elif r.crops_file:
         crops_file = _resolve_safe(r.crops_file)
         if not crops_file.exists():
             raise FileNotFoundError(f"crops file not found: {crops_file}")
         lines = crops_file.read_text().splitlines()
         crops = [ln.strip() for ln in lines if ln.strip() and not ln.startswith('#')]
+        if not crops:
+            raise ValueError("no crops found in crops_file")
+    else:
+        crops = None  # will be auto-discovered below
 
-    if not crops:
-        raise ValueError("no crops specified")
+    import pandas as pd
 
     # Stage 0: Pre-pipeline
     if r.skip_pre_pipeline:
-        effective_raw = str(_resolve_safe(r.raw_file))
+        effective_raw = str(APP_DATA / "cleaned_data.csv")
+        if crops is None:
+            _df = pd.read_csv(effective_raw, low_memory=False)
+            if r.domains:
+                _df = _df[_df["QueryType"].dropna().str.strip().isin(r.domains)]
+            crops = _df["Crop"].dropna().str.strip().unique().tolist()
+            print(f"[INFO] Auto-discovered {len(crops)} crop(s) from input CSV")
     else:
-        raw_file     = _resolve_safe(r.raw_file)
-        state_slug   = r.state.strip().lower().replace(" ", "_")
-        norm_file    = raw_file.parent / f"{state_slug}_norm.csv"
+        raw_file   = APP_DATA / "cleaned_data.csv"
+        if r.pre_output:
+            norm_file = _resolve_safe(r.pre_output)
+            _norm_is_temp = False
+        else:
+            fd, tmp_path = tempfile.mkstemp(suffix='_norm.csv', dir=str(APP_DATA))
+            os.close(fd)
+            norm_file = Path(tmp_path)
+            _norm_is_temp = True
+            print("[INFO] No pre-pipeline output path provided — result kept in RAM only (temp file deleted after use)")
         intermediate = norm_file.parent / f"{norm_file.stem}_state_rows.csv"
 
-        run_state_filter(raw_file, r.state, intermediate)
-        run_crop_normalizer(intermediate, norm_file, crops)
+        run_state_filter(raw_file, r.state, intermediate, domains=r.domains or [])
+
+        if crops is None:
+            run_crop_normalizer(intermediate, norm_file)
+            crops = pd.read_csv(norm_file)["Crop"].dropna().str.strip().unique().tolist()
+            print(f"[INFO] Auto-discovered {len(crops)} canonical crop(s) after normalization")
+        else:
+            run_crop_normalizer(intermediate, norm_file, crops)
 
         if intermediate.exists():
             intermediate.unlink()
@@ -430,6 +477,10 @@ def _run_full_sync(r: FullRequest) -> None:
         except (SystemExit, Exception) as exc:
             print(f"[WARN] Crop '{crop}' failed: {exc}")
             failed.append(crop)
+
+    if not r.skip_pre_pipeline and _norm_is_temp and norm_file.exists():
+        norm_file.unlink()
+        print("[INFO] Temporary pre-pipeline file removed from disk")
 
     # Post-pipeline
     if not r.skip_post_pipeline:
@@ -513,6 +564,8 @@ def app_data_tree():
     all_csvs = []
     if APP_DATA.exists():
         for p in APP_DATA.rglob("*.csv"):
+            if ".ipynb_checkpoints" in p.parts:
+                continue
             try:
                 p.relative_to(outputs_dir)
                 continue
@@ -560,6 +613,40 @@ def delete_file(path: str):
         raise HTTPException(status_code=400, detail="path is a directory")
     target.unlink()
     return {"deleted": path}
+
+
+@app.delete("/folders/{path:path}")
+def delete_folder(path: str):
+    target = _resolve_safe(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="folder not found")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="path is not a directory")
+    shutil.rmtree(target)
+    return {"deleted": path}
+
+
+class RenameRequest(BaseModel):
+    to: str
+
+    @field_validator("to")
+    @classmethod
+    def _safe_to(cls, v: str) -> str:
+        _resolve_safe(v)
+        return v
+
+
+@app.post("/files/rename/{path:path}")
+def rename_file(path: str, body: RenameRequest):
+    source = _resolve_safe(path)
+    dest = _resolve_safe(body.to)
+    if not source.exists():
+        raise HTTPException(status_code=404, detail="source not found")
+    if dest.exists():
+        raise HTTPException(status_code=409, detail="destination already exists")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    source.rename(dest)
+    return {"from": path, "to": body.to}
 
 
 @app.post("/files/upload")

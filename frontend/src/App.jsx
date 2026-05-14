@@ -9,6 +9,7 @@ import { getTree, getJobs, deleteJob, stopJob } from './api.js';
 export default function App() {
   const [fileTree, setFileTree] = useState({ all_csvs: [], crop_qa_files: [], final_csvs: [] });
   const [jobs, setJobs] = useState([]);
+  const [pickMode, setPickMode] = useState(null); // null | { onPick: (path) => void }
 
   useEffect(() => {
     getTree()
@@ -58,11 +59,19 @@ export default function App() {
     <div className="flex flex-col h-screen">
       <Header />
       <div className="flex flex-1 overflow-hidden">
-        <div className="w-60 flex-shrink-0 overflow-y-auto border-r border-border bg-card scrollbar-hide">
-          <FilesPanel fileTree={fileTree} onRefresh={handleFileDeleted} />
+        <div className={`w-60 flex-shrink-0 overflow-y-auto border-r border-border bg-card scrollbar-hide${pickMode ? ' ring-2 ring-primary' : ''}`}>
+          <FilesPanel
+            fileTree={fileTree}
+            onRefresh={handleFileDeleted}
+            pickMode={pickMode}
+            setPickMode={setPickMode}
+          />
         </div>
         <div className="flex-1 overflow-y-auto p-4 bg-background">
-          <FunctionsPanel allCsvs={fileTree.all_csvs} repairDirs={repairDirs} />
+          <FunctionsPanel
+            repairDirs={repairDirs}
+            onRequestPick={(onPick) => setPickMode({ onPick })}
+          />
         </div>
         <div className="w-80 flex-shrink-0 overflow-y-auto border-l border-border bg-card scrollbar-hide">
           <JobsPanel

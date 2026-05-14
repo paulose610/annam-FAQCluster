@@ -32,15 +32,39 @@ Use the [Job endpoints](#job-endpoints) to poll for completion.
 
 ### Pre-pipeline — `POST /run/pre`
 
-Filters a raw CSV to a single state and normalises crop names.
+Filters a raw CSV to a single state, optionally filters by domain (QueryType), and optionally normalises crop names.
 
+At least one of `crops` or `domains` must be provided alongside the mandatory `state`.
+
+**Filter by crops only:**
 ```json
 {
-  "input":            "data/raw.csv",
-  "state":            "Maharashtra",
-  "crops":            ["wheat", "rice", "sugarcane"],
-  "output":           "data/maharashtra_norm.csv",
+  "input":             "data/raw.csv",
+  "state":             "Maharashtra",
+  "crops":             ["Wheat", "Rice", "Sugarcane"],
+  "output":            "data/maharashtra_norm.csv",
   "keep_intermediate": true
+}
+```
+
+**Filter by domains only:**
+```json
+{
+  "input":   "data/raw.csv",
+  "state":   "Maharashtra",
+  "domains": ["Plant Protection", "Nutrient Management", "Weed Management"],
+  "output":  "data/maharashtra_domain.csv"
+}
+```
+
+**Filter by both crops and domains:**
+```json
+{
+  "input":   "data/raw.csv",
+  "state":   "Maharashtra",
+  "crops":   ["Wheat", "Rice"],
+  "domains": ["Plant Protection", "Varieties"],
+  "output":  "data/maharashtra_filtered.csv"
 }
 ```
 
@@ -48,20 +72,24 @@ Filters a raw CSV to a single state and normalises crop names.
 |---|---|---|---|
 | `input` | string | required | Path to raw input CSV |
 | `state` | string | required | State name to filter rows by |
-| `crops` | list[str] | required | Crop names to retain/normalise |
-| `output` | string | required | Path for the normalised output CSV |
+| `crops` | list[str] | — | Crop names to retain/normalise (required if `domains` not given) |
+| `domains` | list[str] | — | QueryType values to filter rows by (required if `crops` not given) |
+| `output` | string | required | Path for the output CSV |
 | `keep_intermediate` | bool | `true` | Keep the state-filtered file before crop normalisation |
+
+If only `domains` is provided (no `crops`), the state-and-domain-filtered file is written directly to `output` without crop normalisation. If `crops` is provided, crop normalisation runs after the state/domain filter.
 
 ---
 
-### Pipeline (single crop) — `POST /run/pipeline`
+### Pipeline — `POST /run/pipeline`
 
-Runs the full clustering pipeline for one crop.
+Runs the full clustering pipeline for one or more crops. If `crops` is omitted, unique crop names are auto-discovered from the `Crop` column of the input CSV and the pipeline runs for each one.
 
+**Explicit crops:**
 ```json
 {
   "raw_file":   "data/maharashtra_norm.csv",
-  "crop":       "wheat",
+  "crops":      ["Wheat", "Rice"],
   "output_dir": "outputs/repair",
   "model":      "../models/qwen2.5-7b-instruct",
   "gpu_id":     0,
@@ -70,16 +98,25 @@ Runs the full clustering pipeline for one crop.
 }
 ```
 
+**Auto-discover all crops in the file:**
+```json
+{
+  "raw_file":   "data/maharashtra_norm.csv",
+  "output_dir": "outputs/repair",
+  "model":      "../models/qwen2.5-7b-instruct"
+}
+```
+
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `raw_file` | string | required | Normalised CSV (output of `/run/pre`) |
-| `crop` | string | required | Crop to process |
+| `crops` | list[str] | — | Crops to process; if omitted, all unique crops in the CSV are used |
 | `output_dir` | string | `"outputs/repair"` | Base output directory |
 | `model` | string | `"../models/qwen2.5-7b-instruct"` | Model path or name |
 | `api_key` | string | `null` | API key if using a remote model |
-| `gpu_id` | int | `0` | GPU device index |
+| `gpu_id` | int | `1` | GPU device index |
 | `batch_size` | int | `8` | Inference batch size |
-| `grid_mode` | string | `"medium"` | Hyperparameter search intensity (`quick`/`medium`/`full`) |
+| `grid_mode` | string | `"quick"` | Hyperparameter search intensity (`quick`/`medium`/`full`/`exhaustive`) |
 | `skip_phase1` | bool | `false` | Skip candidate generation (load from disk) |
 | `skip_phase2` | bool | `false` | Skip grid search (load best config from disk) |
 | `skip_repair` | bool | `false` | Skip cluster repair |

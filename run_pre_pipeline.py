@@ -53,7 +53,7 @@ def _stream(cmd: list) -> None:
         raise subprocess.CalledProcessError(proc.returncode, cmd)
 
 
-def run_state_filter(input_path: Path, state: str, intermediate: Path):
+def run_state_filter(input_path: Path, state: str, intermediate: Path, domains: list[str] = None):
     banner("Stage 1/2 — State Filter")
     cmd = [
         sys.executable,
@@ -62,23 +62,31 @@ def run_state_filter(input_path: Path, state: str, intermediate: Path):
         '--state',  state,
         '--output', str(intermediate),
     ]
+    if domains:
+        cmd += ['--domains', ','.join(domains)]
     print(f"  Input  : {input_path}")
     print(f"  State  : {state}")
+    if domains:
+        print(f"  Domains: {', '.join(domains)}")
     print(f"  Output : {intermediate}")
     _stream(cmd)
     print(f"\n  ✓ State filter complete")
 
 
-def run_crop_normalizer(intermediate: Path, output_path: Path, crops: list[str]):
+def run_crop_normalizer(intermediate: Path, output_path: Path, crops: list[str] = None):
     banner("Stage 2/2 — Crop Normalization")
     cmd = [
         sys.executable,
         str(PRE_PIPELINE_DIR / 'crop_normalizer.py'),
         '--input',  str(intermediate),
         '--output', str(output_path),
-        '--crops',  *crops,
     ]
-    print(f"  Primary crops : {', '.join(crops)}")
+    if crops:
+        cmd += ['--crops', *crops]
+    if crops:
+        print(f"  Primary crops : {', '.join(crops)}")
+    else:
+        print(f"  Primary crops : (all, auto-mapped)")
     print(f"  Output        : {output_path}")
     _stream(cmd)
     print(f"\n  ✓ Crop normalization complete")
