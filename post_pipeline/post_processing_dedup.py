@@ -136,6 +136,9 @@ def deduplicate_and_aggregate(df, text_col='Generated_Question', batch_size=100)
                 cat_df = remaining_df[~remaining_df['unique_q_id'].isin(matched_ids)].reset_index(drop=True)
                 tqdm.write(f"   🗑️  Removed {len(matched_ids)} matches from the pool. New pool size: {len(cat_df)}")
 
+                # Save the reference row (with aggregated frequency) to the final output
+                final_cleaned_data.append(reference_row.to_dict())
+
             else:
                 tqdm.write("   ❌ No matches found. Moving to next row.")
                 # No matches, so the next pool is just the remaining items
