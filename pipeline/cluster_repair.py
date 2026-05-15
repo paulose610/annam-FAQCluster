@@ -151,7 +151,7 @@ class RepairJudge(LocalHFJudge):
         return self.tokenizer.decode(new, skip_special_tokens=True).strip()
 
     @staticmethod
-    def _parse_json_list(self, raw: str) -> list:
+    def _parse_json_list(raw: str) -> list:
         text = re.sub(r"```json|```", "", raw).strip()
         
         m = re.search(r'\[.*\]', text, re.DOTALL)
@@ -250,7 +250,7 @@ class RepairJudge(LocalHFJudge):
             f'{{"group":2,"label":"nutrient deficiency","indices":[4,5]}}]\nJSON:'
         )
         raw       = self._gen_long(prompt, max_new_tokens=350)
-        groups_raw = self._parse_json_list(self,raw)
+        groups_raw = RepairJudge._parse_json_list(raw)
 
         result, seen = [], set()
         for g in groups_raw:
@@ -311,8 +311,8 @@ def step_b_cross_crop(clusters: dict, judge: RepairJudge, crop: str) -> dict:
             clusters[cid]['queries'] = [queries[i] for i in keep]
             clusters[cid]['counts']  = [counts[i]  for i in keep]
             clusters[cid]['size']    = sum(clusters[cid]['counts'])
-        elif keep == 1:
-            # Cluster shrank to 1: mark for deletion
+        else:
+            # Cluster shrank to 0 or 1 query: mark for deletion
             clusters[cid]['_delete'] = True
 
         total_removed += len(off)
@@ -335,6 +335,9 @@ def step_c_split(clusters: dict, diverse_reps: dict, result_df: pd.DataFrame,
     Returns (updated_clusters, n_splits_performed).
     """
     print(f"\n{'─'*60}\nStep C: Coherence diagnostic + split  (flag on: {flag_on})\n{'─'*60}")
+    if not clusters:
+        print("  No clusters remaining — skipping split step")
+        return clusters, 0
     q2idx   = {q: i for i, q in enumerate(result_df['query_text'].tolist())}
     max_cid = max(clusters.keys())
     n_splits = 0
@@ -652,6 +655,20 @@ def run_phase2(candidates: list, out_dir: Path, model_path: str,
 
     p2_df = pd.DataFrame(rows)
     p2_df.to_csv(out_dir / 'phase2_scores.csv', index=False)
+
+    if p2_df.empty:
+        # No candidates were evaluated (e.g. small crop with 0 viable Phase 1 configs).
+        # Fall back to the Phase 1 candidate with the lowest coverage_efficiency.
+        if not candidates:
+            raise ValueError(
+                "No Phase 1 candidates and no Phase 2 results. "
+                "The crop may have too few unique queries to cluster."
+            )
+        best = min(candidates, key=lambda r: r.metrics.get('coverage_efficiency', 1))
+        best_cfg = str(best.config)
+        print(f"\n  WARNING: 0 candidates evaluated in Phase 2 — "
+              f"falling back to Phase 1 best: {best_cfg}")
+        return best_cfg
 
     best_cfg = p2_df.sort_values('composite_score', ascending=False).iloc[0]['config']
     print(f"\n  Best config: {best_cfg}")

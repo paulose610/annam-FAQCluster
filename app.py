@@ -187,6 +187,9 @@ async def _run_job(job_id: str, fn: Callable[[], None]) -> None:
         else:
             jobs[job_id]["status"] = "done"
             jobs[job_id]["stderr"] = ""
+    except _job_ctl.JobCancelled:
+        jobs[job_id]["status"] = "stopped"
+        jobs[job_id]["stderr"] = "stopped by user"
     except SystemExit as exc:
         code = exc.code if exc.code is not None else 0
         if _job_ctl.is_cancelled(job_id):
@@ -292,6 +295,7 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
         print(f"[INFO] Found {len(crops)} unique crop(s): {', '.join(crops)}")
 
     for crop in crops:
+        _job_ctl.check_cancel()
         args = argparse.Namespace(
             raw_file           = resolved_raw,
             crop               = crop,
@@ -322,24 +326,29 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
 
         try:
             candidates = load_candidates(out_dir) if args.skip_phase1 else run_phase1(args, out_dir)
+            _job_ctl.check_cancel()
             best_cfg   = load_best_cfg(out_dir, candidates) if args.skip_phase2 else run_phase2(args, out_dir, candidates)
+            _job_ctl.check_cancel()
 
             if not args.skip_repair:
                 run_repair(args, out_dir, candidates, best_cfg)
+            _job_ctl.check_cancel()
             if not args.skip_unique_q:
                 run_unique_questions(args, out_dir)
 
             run_dedup(out_dir)
+            _job_ctl.check_cancel()
 
             if not args.skip_corpus_filter:
                 corpus_path = Path(args.corpus_file)
                 if corpus_path.exists():
                     run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+            _job_ctl.check_cancel()
 
             if not args.skip_qa_gen:
                 run_qa_gen(args, out_dir)
 
-        except (SystemExit, Exception) as exc:
+        except Exception as exc:
             print(f"[WARN] Crop '{crop}' failed: {exc}")
             failed.append(crop)
 
@@ -363,6 +372,7 @@ def _run_post_sync(r: PostRequest) -> None:
             )
     else:
         final_dir = run_collect(input_dir)
+        _job_ctl.check_cancel()
 
     if not r.skip_dedup:
         post_run_dedup(final_dir)
@@ -435,6 +445,7 @@ def _run_full_sync(r: FullRequest) -> None:
     out_base     = _resolve_safe(r.output_dir) / state_folder
     failed = []
     for crop in crops:
+        _job_ctl.check_cancel()
         args = argparse.Namespace(
             raw_file           = effective_raw,
             crop               = crop,
@@ -465,16 +476,21 @@ def _run_full_sync(r: FullRequest) -> None:
 
         try:
             candidates = run_phase1(args, out_dir)
+            _job_ctl.check_cancel()
             best_cfg   = run_phase2(args, out_dir, candidates)
+            _job_ctl.check_cancel()
             run_repair(args, out_dir, candidates, best_cfg)
+            _job_ctl.check_cancel()
             run_unique_questions(args, out_dir)
             run_dedup(out_dir)
+            _job_ctl.check_cancel()
             corpus_path = Path(args.corpus_file)
             if corpus_path.exists():
                 run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+            _job_ctl.check_cancel()
             if not args.skip_qa_gen:
                 run_qa_gen(args, out_dir)
-        except (SystemExit, Exception) as exc:
+        except Exception as exc:
             print(f"[WARN] Crop '{crop}' failed: {exc}")
             failed.append(crop)
 

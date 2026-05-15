@@ -144,7 +144,7 @@ def filter_faq(input_path: Path, corpus_path: str,
         print("  ✓ No irrelevant rows found.")
     else:
         print("\n  Removed questions:")
-        for q in removed_df[col].tolist():
+        for q in removed_df[available_cols[0]].tolist():
             print(f"    – {q}")
 
     if not dry_run:

@@ -14,6 +14,11 @@ _active_procs: dict[str, subprocess.Popen] = {}
 _cancel_events: dict[str, threading.Event] = {}
 
 
+class JobCancelled(BaseException):
+    """Raised by check_cancel(); inherits BaseException so it bypasses except Exception."""
+    pass
+
+
 def set_job_id(job_id: Optional[str]) -> None:
     _tl.job_id = job_id
 
@@ -33,6 +38,13 @@ def deregister_proc() -> None:
     jid = current_job_id()
     if jid:
         _active_procs.pop(jid, None)
+
+
+def check_cancel() -> None:
+    """Raise JobCancelled if the current thread's job has been cancelled."""
+    jid = current_job_id()
+    if jid and is_cancelled(jid):
+        raise JobCancelled(jid)
 
 
 def is_cancelled(job_id: str) -> bool:

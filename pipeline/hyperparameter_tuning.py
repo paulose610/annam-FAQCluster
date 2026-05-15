@@ -348,7 +348,8 @@ def phase1_fast_screening(df, configs, model, stop_words):
     dist_cache  = {}
     umap_cache  = {}
 
-    candidates = []
+    candidates  = []
+    all_results = []   # all non-None results kept for fallback re-screening
     results_log = []
 
     # Count unique UMAP runs for progress info
@@ -371,6 +372,7 @@ def phase1_fast_screening(df, configs, model, stop_words):
             })
             continue
 
+        all_results.append(result)
         viable, reason = is_viable_config(result)
 
         results_log.append({
@@ -382,6 +384,19 @@ def phase1_fast_screening(df, configs, model, stop_words):
 
         if viable:
             candidates.append(result)
+
+    # Fallback for small/rare crops: if standard thresholds (n_clusters >= 50) rejected
+    # every config, re-screen with relaxed thresholds scaled to the dataset size.
+    if not candidates and all_results:
+        fallback_min = max(5, len(df) // 20)
+        print(f"\n  WARNING: No viable configs under standard thresholds (n_clusters >= 50).")
+        print(f"  Re-screening {len(all_results)} results with relaxed thresholds "
+              f"(min_clusters={fallback_min}, noise_ratio<=0.5)...")
+        for r in all_results:
+            if (r.metrics['n_clusters'] >= fallback_min
+                    and r.metrics['noise_ratio'] <= 0.5):
+                candidates.append(r)
+        print(f"  Relaxed screening found {len(candidates)} candidates")
 
     # Save screening results
     screening_df = pd.DataFrame(results_log)
