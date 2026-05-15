@@ -266,7 +266,8 @@ def run_dedup(out_dir: Path):
     print(f"\n  ✓ Dedup complete — final FAQ: {freq_csv}")
 
 
-def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85):
+def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85,
+                      crop: str | None = None, crops_yaml: str | None = None):
     """Stage 6: Remove irrelevant representative questions via corpus filter."""
     banner("Stage 6/7 — Irrelevant Corpus Filtering")
     freq_csv = out_dir / 'unique_questions_freq.csv'
@@ -276,13 +277,19 @@ def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85):
     print(f"  Corpus   : {corpus_file}")
     print(f"  Fuzz thr : {fuzz_thresh}")
 
-    from pipeline.filter_faq_corpus import filter_faq, load_corpus
+    from pipeline.filter_faq_corpus import filter_faq, load_cross_crop_keywords
+    extra_keywords = None
+    if crop and crops_yaml and Path(crops_yaml).exists():
+        print(f"  Crops    : {crops_yaml}  (target: {crop})")
+        extra_keywords = load_cross_crop_keywords(crops_yaml, crop)
+
     kept_df, removed_df = filter_faq(
-        input_path  = freq_csv,
-        corpus_path = corpus_file,
-        output_path = freq_csv,
-        fuzz_thresh = fuzz_thresh,
-        dry_run     = False,
+        input_path     = freq_csv,
+        corpus_path    = corpus_file,
+        output_path    = freq_csv,
+        fuzz_thresh    = fuzz_thresh,
+        dry_run        = False,
+        extra_keywords = extra_keywords,
     )
     print(f"\n  ✓ Corpus filter complete — {len(kept_df)} rows kept, "
           f"{len(removed_df)} rows removed")
@@ -389,6 +396,11 @@ def parse_args():
                       default=str(DEFAULT_CORPUS),
                       help=('Path to irrelevant_corpus.yaml '
                             f'(default: {DEFAULT_CORPUS})'))
+    _default_crops = SCRIPT_DIR / 'crops.yaml'
+    ctrl.add_argument('--crops-file',
+                      default=str(_default_crops) if _default_crops.exists() else None,
+                      help=('Path to crops.yaml for cross-crop keyword exclusion '
+                            f'(default: {_default_crops} if present, else disabled)'))
     ctrl.add_argument('--fuzz-threshold', type=int, default=100,
                       help='Fuzzy match threshold for corpus filter 0–100 (default: 100 - disabled)')
 
@@ -475,7 +487,8 @@ def main():
             print(f"\n  WARNING: corpus file not found: {args.corpus_file}")
             print("  Skipping corpus filter (use --corpus-file to specify a valid path)")
         else:
-            run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+            run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold,
+                              crop=args.crop, crops_yaml=args.crops_file)
 
     # ── Stage 7: Q&A Generation ───────────────────────────────────────────────
     if args.skip_qa_gen:

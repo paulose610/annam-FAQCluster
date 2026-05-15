@@ -51,3 +51,30 @@ used `self` — but the code is now correct and refactor-safe.
 **Fix 6: `col` replaced with `available_cols[0]` in debug printout**  
 The removed-questions display now consistently uses the first available text column
 (typically `representative_question`). No change to filtering logic.
+
+---
+
+### Stage 6 — Corpus Filter (enhancement)
+
+**Fix 9: Cross-crop keyword exclusion added to Stage 6**  
+Stage 6 now also filters out FAQ rows that mention keywords belonging to any crop
+*other than* the target crop, using `crops.yaml` as the keyword source.
+
+How it works:
+- `load_cross_crop_keywords(crops_yaml, target_crop)` collects all `keywords` entries
+  from every crop in `crops.yaml` except the target crop.
+- It then subtracts the target crop's own keywords from that set, so any keyword shared
+  between two crops (e.g. "blast disease" appearing under multiple crops) is **never** used
+  as an exclusion criterion. This prevents false positives.
+- The resulting exclusion set is merged with the existing `irrelevant_corpus.yaml` keywords
+  and the combined list is passed to the existing `is_irrelevant()` function unchanged.
+
+Behaviour to expect:
+- `corpus_filtered_out.csv` will contain more rows than before — it now catches both
+  irrelevant-topic rows and cross-crop rows in a single pass.
+- The pipeline console will print how many cross-crop keywords were loaded and how many
+  survived after own-keyword subtraction.
+- If the target crop is not found in `crops.yaml`, a warning is printed and cross-crop
+  filtering is skipped gracefully (irrelevant-corpus filter still runs normally).
+- Feature is on by default when `crops.yaml` is present in the project root.
+  Disable with `--crops-file ""` if needed.

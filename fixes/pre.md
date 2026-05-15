@@ -59,3 +59,12 @@ In `filter_faq_corpus.py`, the removed-questions display loop referenced `col`, 
 that was defined in an inner loop and retained whatever value it last held. In some execution
 paths this variable was in scope (harmless); in others it could cause `NameError`. Regardless,
 it always printed from the wrong column when multiple text columns were checked.
+
+**Problem 7: Stage 6 corpus filter had no cross-crop awareness**  
+Stage 6 only filtered against `irrelevant_corpus.yaml` (weather, market prices, contact
+numbers, etc.). Questions that were about a completely different crop — e.g. a wheat question
+appearing in the paddy FAQ output — were not caught at this stage.  
+Stage 3B (LLM-based cross-crop filter) handles this earlier, but it operates on raw cluster
+queries, not on the final representative questions in `unique_questions_freq.csv`. Any
+cross-crop contamination that survived Stage 3B reached the final output unchecked.  
+`crops.yaml` existed with keywords for all 248 crops but was not used anywhere in the pipeline.

@@ -23,6 +23,7 @@ Removed rows are saved to: <output_dir>/corpus_filtered_out.csv
 """
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -48,6 +49,67 @@ def load_corpus(corpus_file: str) -> tuple[list[str], int]:
     ))
     min_len = int(data.get('min_word_length', 3))
     return keywords, min_len
+
+
+def _normalize_crop_name(name: str) -> str:
+    return re.sub(r'[^a-z]+', ' ', name.lower()).strip()
+
+
+def _find_crop_key(crops_data: dict, target_crop: str) -> str | None:
+    """Match a pipeline crop name (e.g. 'Maize (Makka)') to a crops.yaml key."""
+    norm_target = _normalize_crop_name(target_crop)
+    # Primary: crop key (underscores → spaces) contained in target name
+    for key in crops_data:
+        norm_key = key.replace('_', ' ')
+        if norm_key == norm_target or norm_key in norm_target:
+            return key
+    # Fallback: any of the crop's first 3 keywords appears in the target name
+    target_words = set(norm_target.split())
+    for key, body in crops_data.items():
+        for kw in body.get('keywords', [])[:3]:
+            if kw.lower() in target_words:
+                return key
+    return None
+
+
+def load_cross_crop_keywords(crops_yaml: str, target_crop: str) -> list[str]:
+    """
+    Return keywords from every crop in crops.yaml EXCEPT the target crop,
+    minus any keywords that the target crop also owns (to avoid false positives).
+    Typos are intentionally excluded to keep the exclusion list conservative.
+    """
+    with open(crops_yaml, 'r') as f:
+        data = yaml.safe_load(f)
+
+    crops = data.get('Crops', {})
+    target_key = _find_crop_key(crops, target_crop)
+
+    if target_key is None:
+        print(f"  WARNING: '{target_crop}' not found in {crops_yaml} — "
+              "cross-crop exclusion skipped")
+        return []
+
+    own_keywords = {
+        k.lower().strip()
+        for k in crops[target_key].get('keywords', [])
+        if isinstance(k, str) and k.strip()
+    }
+
+    other_keywords: set[str] = set()
+    for key, body in crops.items():
+        if key == target_key:
+            continue
+        for kw in body.get('keywords', []):
+            if isinstance(kw, str) and kw.strip():
+                other_keywords.add(kw.lower().strip())
+
+    # Remove any keyword that also belongs to the target crop
+    exclusion = other_keywords - own_keywords
+    print(f"  Cross-crop exclusion: '{target_key}' identified; "
+          f"{len(other_keywords)} other-crop keywords, "
+          f"{len(own_keywords)} own keywords removed → "
+          f"{len(exclusion)} net exclusion keywords")
+    return list(exclusion)
 
 
 def is_irrelevant(question: str, keywords: list[str],
@@ -100,9 +162,11 @@ def is_irrelevant(question: str, keywords: list[str],
 
 def filter_faq(input_path: Path, corpus_path: str,
                output_path: Path, fuzz_thresh: int,
-               dry_run: bool) -> tuple[pd.DataFrame, pd.DataFrame]:
+               dry_run: bool,
+               extra_keywords: list[str] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Load FAQ CSV, apply corpus filter, return (kept_df, removed_df).
+    extra_keywords: additional exclusion keywords (e.g. from other crops).
     """
     print(f"Loading {input_path} ...")
     df = pd.read_csv(input_path)
@@ -110,7 +174,14 @@ def filter_faq(input_path: Path, corpus_path: str,
 
     print(f"Loading corpus: {corpus_path} ...")
     keywords, min_word_len = load_corpus(corpus_path)
-    print(f"  {len(keywords)} keywords/typos loaded")
+    print(f"  {len(keywords)} irrelevant-corpus keywords/typos loaded")
+
+    if extra_keywords:
+        before = len(keywords)
+        keywords = list(set(keywords) | set(extra_keywords))
+        print(f"  {len(extra_keywords)} cross-crop keywords added "
+              f"({len(keywords) - before} net new after dedup) → "
+              f"{len(keywords)} total")
 
     mask_irrelevant = []
     text_cols = ['representative_question', 'cluster_label', 'answer_label']
@@ -174,17 +245,28 @@ def main():
                     help='Fuzzy match ratio threshold 0–100 (default: 100 - disabled)')
     ap.add_argument('--dry-run', action='store_true',
                     help='Report only, do not write output files')
+    ap.add_argument('--crops-file', default=None,
+                    help='Path to crops.yaml for cross-crop keyword exclusion')
+    ap.add_argument('--crop', default=None,
+                    help='Target crop name (required when --crops-file is set)')
     args = ap.parse_args()
 
     input_path  = Path(args.input)
     output_path = Path(args.output) if args.output else input_path
 
+    extra_keywords = None
+    if args.crops_file and args.crop:
+        extra_keywords = load_cross_crop_keywords(args.crops_file, args.crop)
+    elif args.crops_file or args.crop:
+        print("WARNING: both --crops-file and --crop are required for cross-crop filtering; skipping")
+
     filter_faq(
-        input_path  = input_path,
-        corpus_path = args.corpus,
-        output_path = output_path,
-        fuzz_thresh = args.fuzz_threshold,
-        dry_run     = args.dry_run,
+        input_path     = input_path,
+        corpus_path    = args.corpus,
+        output_path    = output_path,
+        fuzz_thresh    = args.fuzz_threshold,
+        dry_run        = args.dry_run,
+        extra_keywords = extra_keywords,
     )
 
 
