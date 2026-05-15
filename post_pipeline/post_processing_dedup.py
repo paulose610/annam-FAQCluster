@@ -119,32 +119,30 @@ def deduplicate_and_aggregate(df, text_col='Generated_Question', batch_size=100)
                 ref_phase = pd.concat([ref_phase, pd.DataFrame([{}])], ignore_index=True)
 
                 phase_data.append(ref_phase)
-                
+
                 # Sum the raw_frequency of the matches
                 summed_frequency = matches_df['raw_frequency'].sum()
-    
+
                 tqdm.write(f"   ✅ SUCCESS: Found {len(matched_ids)} verified matches.")
                 for _, m_row in matches_df.iterrows():
                     tqdm.write(f"      -> Matched [{m_row['unique_q_id']}]: {m_row[text_col]} (Freq: {m_row['raw_frequency']})")
-                    
+
                 tqdm.write(f"   📈 Aggregating Frequencies: {current_freq} + {summed_frequency} = {current_freq + summed_frequency}")
-                    
+
                 # Add it to the reference row
                 reference_row['raw_frequency'] += summed_frequency
-                    
+
                 # Remove matched rows from the remaining pool
                 cat_df = remaining_df[~remaining_df['unique_q_id'].isin(matched_ids)].reset_index(drop=True)
                 tqdm.write(f"   🗑️  Removed {len(matched_ids)} matches from the pool. New pool size: {len(cat_df)}")
-                
+
             else:
                 tqdm.write("   ❌ No matches found. Moving to next row.")
                 # No matches, so the next pool is just the remaining items
                 cat_df = remaining_df
-                    
+
                 # Save the updated reference row to our final list
                 final_cleaned_data.append(reference_row.to_dict())
-
-            print(phase_data[-1].to_dict())
 
     tqdm.write(f"\n{'='*70}\n🎉 PROCESSING COMPLETE\n{'='*70}")
     tqdm.write(f"Original Dataset Size: {len(df)}")

@@ -90,7 +90,7 @@ export default function FileRow({
         />
       ) : (
         <span className="flex-1 truncate" title={file.path}>
-          {file.name}
+          {file.displayName || file.name}
         </span>
       )}
 

@@ -603,6 +603,7 @@ def app_data_tree():
             entry = _file_entry(qa_file)
             entry["crop"] = crop_slug
             entry["state"] = state_name
+            entry["displayName"] = crop_slug
             crop_qa_files.append(entry)
 
     final_csvs = []
@@ -637,6 +638,16 @@ def delete_file(path: str):
     if target.is_dir():
         raise HTTPException(status_code=400, detail="path is a directory")
     target.unlink()
+    # When deleting a prefixed file (dedup_* or phase_*) from a repair/final dir,
+    # also remove the base file (without the prefix) if it exists.
+    parent = target.parent
+    name = target.name
+    for prefix in ("dedup_", "phase_"):
+        if name.startswith(prefix):
+            base = parent / name[len(prefix):]
+            if base.exists() and base.is_file():
+                base.unlink()
+            break
     return {"deleted": path}
 
 
