@@ -204,3 +204,76 @@ for q in removed_df[available_cols[0]].tolist():
 
 `available_cols[0]` is always defined at this point (guarded by the `if not available_cols`
 check earlier in the function) and is typically `representative_question`.
+
+---
+
+## Fix 7 — `int()` crash when LLM returns dict objects inside `indices`
+
+**File:** `pipeline/cluster_repair.py`  
+**Functions:** `split_cluster`, `cross_crop_filter`  
+**Stage:** Stage 3 — Cluster Repair, Steps B & C  
+**Severity:** High — crashes the entire crop run mid-repair
+
+**Root cause:**  
+The LLM occasionally returns malformed JSON where the `indices` array contains nested
+objects instead of plain integers (e.g. `[{"value":1},{"value":2}]`). Both
+`split_cluster` and `cross_crop_filter` called `int(i)` directly on each element,
+raising `TypeError: int() argument must be a string, a bytes-like object or a real
+number, not 'dict'`.
+
+**Before:**
+```python
+# split_cluster
+idxs = [int(i) - 1 for i in g.get("indices", [])
+        if 1 <= int(i) <= len(queries) and (int(i) - 1) not in seen]
+
+# cross_crop_filter
+return [int(i) - 1 for i in off if 1 <= int(i) <= len(queries)]
+```
+
+**After:**  
+Added `_safe_int(x)` helper that returns `None` for any non-castable type (dicts,
+lists, bools). Both call sites now use it, silently skipping bad values. Unassigned
+queries are absorbed into the largest group by the existing fallback.
+
+```python
+def _safe_int(x):
+    if isinstance(x, bool): return None
+    if isinstance(x, (int, float)): return int(x)
+    if isinstance(x, str):
+        try: return int(x)
+        except ValueError: return None
+    return None
+```
+
+---
+
+## Fix 8 — LLM prompt hardening + retry for non-integer `indices`
+
+**File:** `pipeline/cluster_repair.py`  
+**Functions:** `split_cluster`, `cross_crop_filter`  
+**Stage:** Stage 3 — Cluster Repair, Steps B & C  
+**Severity:** Medium — preventive; reduces occurrence of Fix 7 scenario
+
+**Root cause:**  
+The original prompts did not explicitly forbid object values inside `indices`, making
+it easy for the model to produce `[{"value":1}]`-style output.
+
+**Changes:**  
+1. Both prompts now say `"indices" values MUST be plain integers like [1,2,3] — NOT objects`.  
+2. `split_cluster` extracted its prompt into `_split_prompt` (static) and wraps generation
+   in a retry loop: if the first response contains any non-integer index, a warning is
+   logged and one retry is issued. The `_safe_int` backstop (Fix 7) still applies on the
+   second attempt.
+
+```python
+for attempt in range(2):
+    raw        = self._gen_long(self._split_prompt(qstr, crop), max_new_tokens=350)
+    groups_raw = RepairJudge._parse_json_list(raw)
+    bad = any(not isinstance(i, (int, float))
+              for g in groups_raw for i in g.get("indices", []))
+    if bad and attempt == 0:
+        logging.warning("split_cluster: non-integer indices in LLM output — retrying")
+        continue
+    break
+```

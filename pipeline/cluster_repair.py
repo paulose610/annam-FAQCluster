@@ -132,6 +132,20 @@ def step_a_diverse_reps(clusters: dict, result_df: pd.DataFrame,
 # Extended LLM judge — adds JSON-output methods for repair operations
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _safe_int(x):
+    """Convert x to int if possible; return None if x is a dict, list, or otherwise uncastable."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        return int(x)
+    if isinstance(x, str):
+        try:
+            return int(x)
+        except ValueError:
+            return None
+    return None
+
+
 class RepairJudge(LocalHFJudge):
 
     def _gen_long(self, user_text: str, max_new_tokens: int = 300) -> str:
@@ -196,12 +210,15 @@ class RepairJudge(LocalHFJudge):
             f"Identify queries that clearly ask about a DIFFERENT crop (not {crop}).\n\n"
             f"{qstr}\n\n"
             f'Return ONLY JSON: {{"off": []}} where "off" is a list of 1-based '
-            f"indices of queries NOT about {crop}. Empty list if all are about {crop}.\nJSON:"
+            f"plain integer indices of queries NOT about {crop}. "
+            f"Integers only — no objects, no strings. "
+            f'Example: {{"off": [2, 5, 7]}}. Empty list if all are about {crop}.\nJSON:'
         )
         raw  = self._gen_long(prompt, max_new_tokens=80)
         data = self._parse_json_obj(raw)
         off  = data.get("off", [])
-        return [int(i) - 1 for i in off if 1 <= int(i) <= len(queries)]
+        safe = [_safe_int(i) for i in off]
+        return [v - 1 for v in safe if v is not None and 1 <= v <= len(queries)]
 
     # ── C: Coherence diagnostic ───────────────────────────────────────────────
 
@@ -226,14 +243,9 @@ class RepairJudge(LocalHFJudge):
 
     # ── C: Split ─────────────────────────────────────────────────────────────
 
-    def split_cluster(self, queries: list, crop: str) -> list:
-        """
-        Groups queries into sub-clusters that each require the same advice.
-        Returns [{'label': str, 'indices': [0-based int]}].
-        A single-group result means no split is needed.
-        """
-        qstr = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
-        prompt = (
+    @staticmethod
+    def _split_prompt(qstr: str, crop: str) -> str:
+        return (
             f"You are an agricultural extension officer for {crop}.\n"
             f"Group these farmer queries so that ALL queries in each group need "
             f"the SAME specific practical advice.\n\n"
@@ -243,19 +255,42 @@ class RepairJudge(LocalHFJudge):
             f"- If all queries need the same advice, return one group with all indices\n"
             f'- Each "label" must be a 2-4 word topic name (e.g. "stem borer control", '
             f'"nutrient deficiency", "weed management") — never use the words '
-            f'"short description" or "group"\n\n'
+            f'"short description" or "group"\n'
+            f'- "indices" values MUST be plain integers like [1,2,3] — NOT objects\n\n'
             f"Queries:\n{qstr}\n\n"
             f"Return ONLY valid JSON array, no text before or after:\n"
             f'[{{"group":1,"label":"stem borer control","indices":[1,2,3]}},'
             f'{{"group":2,"label":"nutrient deficiency","indices":[4,5]}}]\nJSON:'
         )
-        raw       = self._gen_long(prompt, max_new_tokens=350)
-        groups_raw = RepairJudge._parse_json_list(raw)
+
+    def split_cluster(self, queries: list, crop: str) -> list:
+        """
+        Groups queries into sub-clusters that each require the same advice.
+        Returns [{'label': str, 'indices': [0-based int]}].
+        A single-group result means no split is needed.
+        """
+        qstr = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
+
+        for attempt in range(2):
+            raw        = self._gen_long(self._split_prompt(qstr, crop), max_new_tokens=350)
+            groups_raw = RepairJudge._parse_json_list(raw)
+
+            # Check whether any index is non-integer (malformed LLM output)
+            bad = any(
+                not isinstance(i, (int, float))
+                for g in groups_raw
+                for i in g.get("indices", [])
+            )
+            if bad and attempt == 0:
+                logging.warning("split_cluster: non-integer indices in LLM output — retrying")
+                continue
+            break
 
         result, seen = [], set()
         for g in groups_raw:
-            idxs = [int(i) - 1 for i in g.get("indices", [])
-                    if 1 <= int(i) <= len(queries) and (int(i) - 1) not in seen]
+            raw_idxs = [_safe_int(i) for i in g.get("indices", [])]
+            idxs = [v - 1 for v in raw_idxs
+                    if v is not None and 1 <= v <= len(queries) and (v - 1) not in seen]
             seen.update(idxs)
             if idxs:
                 result.append({"label": str(g.get("label", ""))[:100], "indices": idxs})

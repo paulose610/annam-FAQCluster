@@ -45,6 +45,10 @@ def main():
 
         if not target_path.exists():
             missing.append(item.name)
+            stale = final_dir / f"{item.name}_faq.csv"
+            if stale.exists():
+                stale.unlink()
+                print(f"Removed stale: {stale.name}")
             continue
 
         new_name = f"{item.name}_faq.csv"
