@@ -81,14 +81,14 @@ export const DOMAIN_NAMES = [
 ].sort();
 
 export const CROP_NAMES = [
-  'Acid Lime', 'Almond', 'Aloe Vera', 'Amaranthus', 'Aonla', 'Apple', 'Apricot',
+  'Acid Lime', 'Almond', 'Aloe Vera', 'Amaranthus', 'Anthurium', 'Aonla', 'Apple', 'Apricot',
   'Arecanut', 'Arum', 'Ash Gourd', 'Avocado', 'Babul', 'Bael', 'Banana',
   'Barnyard Millet', 'Barley', 'Bay Leaf', 'Beekeeping', 'Beetroot', 'Bengal Gram',
   'Ber', 'Berseem', 'Betel Vine', 'Birdwood Grass', "Bishop's Weed", 'Bitter Gourd',
   'Black Gram', 'Bottle Gourd', 'Broad Bean', 'Brinjal', 'Broccoli',
   'Brussels Sprouts', 'Buckwheat', 'Buffel Grass', 'Bush Squash', 'Butter Pea',
   'Cabbage', 'Cardamom', 'Carnation', 'Carrot', 'Castor', 'Cashew', 'Cauliflower',
-  'Celery', 'Chapan Kaddu', 'Chestnut', 'Chillies', 'China Aster', 'Chinese Cabbage',
+  'Celery', 'Chapan Kaddu', 'Chestnut', 'Capsicum', 'Chillies', 'China Aster', 'Chinese Cabbage',
   'Chinar Tree', 'Chrysanthemum', 'Cinnamon', 'Citrus', 'Clove', 'Cluster Bean',
   'Cocoa', 'Coconut', 'Coffee', 'Coleus', 'Colocasia', 'Coriander', 'Cotton',
   'Cowpea', 'Crossandra', 'Cucumber', 'Cumin', 'Curry Leaf', 'Custard Apple',

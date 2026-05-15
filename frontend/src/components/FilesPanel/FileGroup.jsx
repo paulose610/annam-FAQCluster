@@ -200,15 +200,18 @@ export default function FileGroup({
       if (keys.length === 0) {
         content = <div className="px-4 py-2 text-xs text-muted-foreground/60 italic">No files</div>;
       } else {
-        content = keys.map((k) => (
+        content = keys.map((k) => {
+          const fp = groups[k][0]?.folderPath || (basePath ? `${basePath}/${k}` : k);
+          return (
           <SubGroup
             key={`${refreshKey}-${k}`}
             label={k}
             files={groups[k]}
-            folderPath={basePath ? `${basePath}/${k}` : k}
+            folderPath={fp}
             {...rowProps}
           />
-        ));
+          );
+        });
       }
     } else {
       if (files.length === 0) {

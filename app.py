@@ -590,12 +590,21 @@ def app_data_tree():
             crop_qa_files.append(entry)
 
     final_csvs = []
-    if final_root.exists():
-        for p in sorted(final_root.rglob("*.csv")):
-            state_name = p.parent.name
-            entry = _file_entry(p)
-            entry["state"] = state_name
-            final_csvs.append(entry)
+    if repair_dir.exists():
+        for state_dir in sorted(repair_dir.iterdir()):
+            if not state_dir.is_dir():
+                continue
+            final_dir = state_dir / "final"
+            if not final_dir.exists():
+                continue
+            for p in sorted(final_dir.iterdir()):
+                if not p.is_file():
+                    continue
+                if p.name.startswith("dedup_") or p.name.startswith("phase_"):
+                    entry = _file_entry(p)
+                    entry["state"] = state_dir.name
+                    entry["folderPath"] = str(final_dir.relative_to(APP_DATA))
+                    final_csvs.append(entry)
 
     return {
         "all_csvs": all_csvs,

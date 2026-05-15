@@ -1,53 +1,139 @@
-import { useState } from 'react';
+import { useState, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
 
 const inputClass =
   'w-full bg-input border border-border rounded-md px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-ring transition-shadow';
 
-function CropsSelector({ value, onChange, cropNames }) {
+function MultiSelector({ value, onChange, names, placeholder }) {
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const [expanded, setExpanded] = useState(false);
+  const [expandedRect, setExpandedRect] = useState(null);
+  const listRef = useRef(null);
+  const containerRef = useRef(null);
 
-  const filtered = (cropNames || []).filter(
-    (c) => !value.includes(c) && c.toLowerCase().includes(search.toLowerCase()),
+  const filtered = (names || []).filter(
+    (c) => !value.includes(c) && c.toLowerCase().includes(search.trim().toLowerCase()),
   );
 
-  function addCrop(crop) {
-    onChange([...value, crop]);
+  useEffect(() => {
+    if (listRef.current && highlightedIndex >= 0) {
+      const item = listRef.current.children[highlightedIndex];
+      if (item) item.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightedIndex]);
+
+  function addItem(item) {
+    onChange([...value, item]);
     setSearch('');
+    setHighlightedIndex(-1);
   }
 
-  function removeCrop(crop) {
-    onChange(value.filter((c) => c !== crop));
+  function removeItem(item) {
+    onChange(value.filter((c) => c !== item));
   }
+
+  function handleKeyDown(e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setOpen(true);
+      setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlightedIndex >= 0 && highlightedIndex < filtered.length) {
+        addItem(filtered[highlightedIndex]);
+      }
+    } else if (e.key === 'Escape') {
+      if (expanded) setExpanded(false);
+      else { setOpen(false); setHighlightedIndex(-1); }
+    }
+  }
+
+  function handleExpand(e) {
+    e.preventDefault();
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      setExpandedRect({ left: rect.left, width: rect.width });
+    }
+    setExpanded(true);
+  }
+
+  const listItems = filtered.map((c, i) => (
+    <button
+      key={c}
+      type="button"
+      className={`w-full text-left px-3 py-1.5 text-sm cursor-pointer ${i === highlightedIndex ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-accent hover:text-accent-foreground'}`}
+      onMouseDown={() => addItem(c)}
+      onMouseEnter={() => setHighlightedIndex(i)}
+    >
+      {c}
+    </button>
+  ));
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="relative">
+      <div className="relative" ref={containerRef}>
         <input
           type="text"
           className={inputClass}
-          placeholder="Search crops…"
+          placeholder={placeholder}
           value={search}
-          onChange={(e) => { setSearch(e.target.value); setOpen(true); }}
+          onChange={(e) => { setSearch(e.target.value); setOpen(true); setHighlightedIndex(-1); }}
           onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onBlur={() => { if (!expanded) setTimeout(() => { setOpen(false); setHighlightedIndex(-1); }, 150); }}
+          onKeyDown={handleKeyDown}
         />
-        {open && filtered.length > 0 && (
-          <div className="absolute top-full left-0 right-0 z-10 mt-0.5 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-            {filtered.map((c) => (
+        {open && filtered.length > 0 && !expanded && (
+          <div className="absolute top-full left-0 right-0 z-10 mt-0.5 bg-popover border border-border rounded-md shadow-lg">
+            <div className="flex justify-end px-1 py-0.5 border-b border-border/40">
               <button
-                key={c}
                 type="button"
-                className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
-                onMouseDown={() => addCrop(c)}
+                title="Expand"
+                className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent cursor-pointer text-xs leading-none"
+                onMouseDown={handleExpand}
               >
-                {c}
+                ↕
               </button>
-            ))}
+            </div>
+            <div ref={listRef} className="max-h-44 overflow-y-auto">
+              {listItems}
+            </div>
           </div>
         )}
       </div>
+      {expanded && open && filtered.length > 0 && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            bottom: 0,
+            left: expandedRect?.left ?? 0,
+            width: expandedRect?.width ?? 300,
+            zIndex: 9999,
+          }}
+          className="bg-popover border border-border rounded-md shadow-xl flex flex-col"
+        >
+          <div className="flex justify-end px-1 py-0.5 border-b border-border/40 shrink-0">
+            <button
+              type="button"
+              title="Collapse"
+              className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent cursor-pointer text-base leading-none"
+              onClick={() => setExpanded(false)}
+            >
+              ×
+            </button>
+          </div>
+          <div ref={listRef} className="flex-1 overflow-y-auto">
+            {listItems}
+          </div>
+        </div>,
+        document.body,
+      )}
       {value.length > 0 && (
         <div className="flex flex-col gap-1 mt-1">
           {value.map((c) => (
@@ -59,74 +145,7 @@ function CropsSelector({ value, onChange, cropNames }) {
               <button
                 type="button"
                 className="ml-2 text-muted-foreground hover:text-destructive leading-none cursor-pointer"
-                onClick={() => removeCrop(c)}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DomainsSelector({ value, onChange, domainNames }) {
-  const [search, setSearch] = useState('');
-  const [open, setOpen] = useState(false);
-
-  const filtered = (domainNames || []).filter(
-    (d) => !value.includes(d) && d.toLowerCase().includes(search.toLowerCase()),
-  );
-
-  function addDomain(domain) {
-    onChange([...value, domain]);
-    setSearch('');
-  }
-
-  function removeDomain(domain) {
-    onChange(value.filter((d) => d !== domain));
-  }
-
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="relative">
-        <input
-          type="text"
-          className={inputClass}
-          placeholder="Search domains…"
-          value={search}
-          onChange={(e) => { setSearch(e.target.value); setOpen(true); }}
-          onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
-        />
-        {open && filtered.length > 0 && (
-          <div className="absolute top-full left-0 right-0 z-10 mt-0.5 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-            {filtered.map((d) => (
-              <button
-                key={d}
-                type="button"
-                className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
-                onMouseDown={() => addDomain(d)}
-              >
-                {d}
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-      {value.length > 0 && (
-        <div className="flex flex-col gap-1 mt-1">
-          {value.map((d) => (
-            <div
-              key={d}
-              className="flex items-center justify-between bg-accent/40 border border-border rounded px-2 py-0.5 text-xs text-foreground"
-            >
-              <span>{d}</span>
-              <button
-                type="button"
-                className="ml-2 text-muted-foreground hover:text-destructive leading-none cursor-pointer"
-                onClick={() => removeDomain(d)}
+                onClick={() => removeItem(c)}
               >
                 ×
               </button>
@@ -141,33 +160,89 @@ function DomainsSelector({ value, onChange, domainNames }) {
 function StateSelector({ value, onChange, stateNames }) {
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
+  const [highlightedIndex, setHighlightedIndex] = useState(-1);
+  const [expanded, setExpanded] = useState(false);
+  const [expandedRect, setExpandedRect] = useState(null);
+  const listRef = useRef(null);
+  const containerRef = useRef(null);
 
   const displayText = value || search;
   const filtered = (stateNames || []).filter(
     (s) => s.toLowerCase().includes((value ? '' : search).toLowerCase()),
   );
 
+  useEffect(() => {
+    if (listRef.current && highlightedIndex >= 0) {
+      const item = listRef.current.children[highlightedIndex];
+      if (item) item.scrollIntoView({ block: 'nearest' });
+    }
+  }, [highlightedIndex]);
+
   function selectState(state) {
     onChange(state);
     setSearch('');
     setOpen(false);
+    setExpanded(false);
+    setHighlightedIndex(-1);
   }
 
   function handleInput(e) {
     onChange('');
     setSearch(e.target.value);
     setOpen(true);
+    setHighlightedIndex(-1);
   }
 
   function handleClear(e) {
     e.preventDefault();
     onChange('');
     setSearch('');
+    setHighlightedIndex(-1);
   }
+
+  function handleKeyDown(e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setOpen(true);
+      setHighlightedIndex((i) => Math.min(i + 1, filtered.length - 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlightedIndex((i) => Math.max(i - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (highlightedIndex >= 0 && highlightedIndex < filtered.length) {
+        selectState(filtered[highlightedIndex]);
+      }
+    } else if (e.key === 'Escape') {
+      if (expanded) setExpanded(false);
+      else { setOpen(false); setHighlightedIndex(-1); }
+    }
+  }
+
+  function handleExpand(e) {
+    e.preventDefault();
+    if (containerRef.current) {
+      const rect = containerRef.current.getBoundingClientRect();
+      setExpandedRect({ left: rect.left, width: rect.width });
+    }
+    setExpanded(true);
+  }
+
+  const listItems = filtered.map((s, i) => (
+    <button
+      key={s}
+      type="button"
+      className={`w-full text-left px-3 py-1.5 text-sm cursor-pointer ${i === highlightedIndex ? 'bg-accent text-accent-foreground' : 'text-foreground hover:bg-accent hover:text-accent-foreground'}`}
+      onMouseDown={() => selectState(s)}
+      onMouseEnter={() => setHighlightedIndex(i)}
+    >
+      {s}
+    </button>
+  ));
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="relative">
+      <div className="relative" ref={containerRef}>
         <input
           type="text"
           className={inputClass}
@@ -175,7 +250,8 @@ function StateSelector({ value, onChange, stateNames }) {
           value={displayText}
           onChange={handleInput}
           onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onBlur={() => { if (!expanded) setTimeout(() => { setOpen(false); setHighlightedIndex(-1); }, 150); }}
+          onKeyDown={handleKeyDown}
         />
         {value && (
           <button
@@ -186,21 +262,52 @@ function StateSelector({ value, onChange, stateNames }) {
             ×
           </button>
         )}
-        {open && filtered.length > 0 && (
-          <div className="absolute top-full left-0 right-0 z-10 mt-0.5 bg-popover border border-border rounded-md shadow-lg max-h-48 overflow-y-auto">
-            {filtered.map((s) => (
+        {open && filtered.length > 0 && !expanded && (
+          <div className="absolute top-full left-0 right-0 z-10 mt-0.5 bg-popover border border-border rounded-md shadow-lg">
+            <div className="flex justify-end px-1 py-0.5 border-b border-border/40">
               <button
-                key={s}
                 type="button"
-                className="w-full text-left px-3 py-1.5 text-sm text-foreground hover:bg-accent hover:text-accent-foreground cursor-pointer"
-                onMouseDown={() => selectState(s)}
+                title="Expand"
+                className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent cursor-pointer text-xs leading-none"
+                onMouseDown={handleExpand}
               >
-                {s}
+                ↕
               </button>
-            ))}
+            </div>
+            <div ref={listRef} className="max-h-44 overflow-y-auto">
+              {listItems}
+            </div>
           </div>
         )}
       </div>
+      {expanded && open && filtered.length > 0 && createPortal(
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            bottom: 0,
+            left: expandedRect?.left ?? 0,
+            width: expandedRect?.width ?? 300,
+            zIndex: 9999,
+          }}
+          className="bg-popover border border-border rounded-md shadow-xl flex flex-col"
+        >
+          <div className="flex justify-end px-1 py-0.5 border-b border-border/40 shrink-0">
+            <button
+              type="button"
+              title="Collapse"
+              className="text-muted-foreground hover:text-foreground px-1.5 py-0.5 rounded hover:bg-accent cursor-pointer text-base leading-none"
+              onClick={() => setExpanded(false)}
+            >
+              ×
+            </button>
+          </div>
+          <div ref={listRef} className="flex-1 overflow-y-auto">
+            {listItems}
+          </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }
@@ -375,10 +482,11 @@ export default function RunTile({ title, description, fields, onRun, allCsvs, re
             return (
               <div key={f.key} className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground">{f.label}</label>
-                <CropsSelector
+                <MultiSelector
                   value={values[f.key]}
                   onChange={(v) => setValue(f.key, v)}
-                  cropNames={cropNames}
+                  names={cropNames}
+                  placeholder="Search crops…"
                 />
               </div>
             );
@@ -387,10 +495,11 @@ export default function RunTile({ title, description, fields, onRun, allCsvs, re
             return (
               <div key={f.key} className="flex flex-col gap-1">
                 <label className="text-xs font-medium text-muted-foreground">{f.label}</label>
-                <DomainsSelector
+                <MultiSelector
                   value={values[f.key]}
                   onChange={(v) => setValue(f.key, v)}
-                  domainNames={domainNames}
+                  names={domainNames}
+                  placeholder="Search domains…"
                 />
               </div>
             );

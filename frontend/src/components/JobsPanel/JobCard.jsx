@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Trash2, Square } from 'lucide-react';
+import PipelineOutput, { parsePipelineOutput, PostPipelineOutput, parsePostPipelineOutput, PrePipelineOutput, parsePrePipelineOutput } from './PipelineOutput.jsx';
 
 const STATUS_BORDER = {
   pending: 'border-l-muted-foreground',
@@ -93,9 +94,19 @@ export default function JobCard({ job, onDelete, onStop, isExpanded, onToggle })
         <span>{formatLocalTime(job.created_at)}</span>
       </div>
       {isExpanded && (
-        <div className="border-t border-border px-3 py-2" onClick={(e) => e.stopPropagation()}>
-          <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">stdout</div>
-          <pre className="font-mono text-xs bg-slate-900 text-slate-400 p-2 max-h-72 overflow-y-auto rounded whitespace-pre-wrap">{job.stdout || '(empty)'}</pre>
+        <div className="border-t border-border px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+          {parsePipelineOutput(job.stdout) ? (
+            <PipelineOutput stdout={job.stdout} />
+          ) : parsePostPipelineOutput(job.stdout) ? (
+            <PostPipelineOutput stdout={job.stdout} />
+          ) : parsePrePipelineOutput(job.stdout) ? (
+            <PrePipelineOutput stdout={job.stdout} />
+          ) : (
+            <>
+              <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1">stdout</div>
+              <pre className="font-mono text-xs bg-slate-900 text-slate-400 p-2 max-h-72 overflow-y-auto rounded whitespace-pre-wrap">{job.stdout || '(empty)'}</pre>
+            </>
+          )}
           {(job.status === 'failed' || job.status === 'stopped') && (
             <>
               <div className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wider mb-1 mt-2">stderr</div>

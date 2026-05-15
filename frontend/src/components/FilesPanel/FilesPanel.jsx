@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react';
-import { RefreshCw, Upload, Trash2, CheckSquare, Square, X } from 'lucide-react';
+import { RefreshCw, Upload, Trash2, Download, CheckSquare, Square, X } from 'lucide-react';
 import FileGroup from './FileGroup.jsx';
-import { uploadFile, deleteFile } from '../../api.js';
+import { uploadFile, deleteFile, downloadUrl } from '../../api.js';
 
 export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode }) {
   const inputRef = useRef(null);
@@ -39,6 +39,18 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
       if (next.has(path)) next.delete(path);
       else next.add(path);
       return next;
+    });
+  }
+
+  function handleBatchDownload() {
+    if (selectedPaths.size === 0) return;
+    [...selectedPaths].forEach((p) => {
+      const a = document.createElement('a');
+      a.href = downloadUrl(p);
+      a.download = p.split('/').pop();
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     });
   }
 
@@ -102,14 +114,24 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
           {selectMode ? <CheckSquare size={13} /> : <Square size={13} />}
         </button>
         {selectMode && (
-          <button
-            className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-md transition-colors ${selectedPaths.size > 0 ? 'text-destructive hover:bg-destructive/10' : 'text-muted-foreground/40 cursor-not-allowed'}`}
-            onClick={handleBatchDelete}
-            disabled={selectedPaths.size === 0}
-            title={`Delete ${selectedPaths.size} selected`}
-          >
-            <Trash2 size={13} />
-          </button>
+          <>
+            <button
+              className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-md transition-colors ${selectedPaths.size > 0 ? 'text-primary hover:bg-primary/10' : 'text-muted-foreground/40 cursor-not-allowed'}`}
+              onClick={handleBatchDownload}
+              disabled={selectedPaths.size === 0}
+              title={`Download ${selectedPaths.size} selected`}
+            >
+              <Download size={13} />
+            </button>
+            <button
+              className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-md transition-colors ${selectedPaths.size > 0 ? 'text-destructive hover:bg-destructive/10' : 'text-muted-foreground/40 cursor-not-allowed'}`}
+              onClick={handleBatchDelete}
+              disabled={selectedPaths.size === 0}
+              title={`Delete ${selectedPaths.size} selected`}
+            >
+              <Trash2 size={13} />
+            </button>
+          </>
         )}
         <button
           className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground transition-colors"
@@ -132,7 +154,6 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
         label="Final CSVs"
         files={fileTree.final_csvs || []}
         groupBy="state"
-        basePath="final"
         {...sharedProps}
       />
     </div>
