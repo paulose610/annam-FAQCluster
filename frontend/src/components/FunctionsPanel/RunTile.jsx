@@ -488,6 +488,7 @@ export default function RunTile({ title, description, fields, onRun, allCsvs, re
                   names={cropNames}
                   placeholder="Search crops…"
                 />
+                {f.hint && <p className="text-xs text-muted-foreground/70 italic">{f.hint}</p>}
               </div>
             );
           }
@@ -501,6 +502,7 @@ export default function RunTile({ title, description, fields, onRun, allCsvs, re
                   names={domainNames}
                   placeholder="Search domains…"
                 />
+                {f.hint && <p className="text-xs text-muted-foreground/70 italic">{f.hint}</p>}
               </div>
             );
           }

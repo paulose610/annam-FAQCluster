@@ -139,8 +139,8 @@ const PRE_FIELDS = [
 
 const PIPELINE_FIELDS = [
   { key: 'input',     label: 'Input CSV',type: 'csv-from-sidebar' },
-  { key: 'crops',     label: 'Crops',    type: 'crops-selector' },
-  { key: 'domains',   label: 'Domains',  type: 'domains-selector' },
+  { key: 'crops',     label: 'Crops',    type: 'crops-selector',   hint: '* If none selected, all crops present in the selected file will be processed.' },
+  { key: 'domains',   label: 'Domains',  type: 'domains-selector', hint: '* If none selected, all domains present in the selected file will be processed.' },
   {
     key: 'grid_mode', label: 'Grid mode', type: 'select',
     defaultValue: 'quick', options: GRID_MODE_OPTIONS,
@@ -155,6 +155,7 @@ const PIPELINE_FIELDS = [
 
 const POST_FIELDS = [
   { key: 'input', label: 'Crop QA folder', type: 'repair-dir-dropdown' },
+  { key: 'crops', label: 'Crops',          type: 'crops-selector', hint: '* If none selected, all crops present in the selected folder will be processed.' },
 ];
 
 const FULL_FIELDS = [

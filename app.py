@@ -129,7 +129,7 @@ class PipelineRequest(BaseModel):
 
 class PostRequest(BaseModel):
     input: str = "outputs/repair"
-    skip_collect: bool = False
+    crops: Optional[List[str]] = None
     skip_dedup: bool = False
 
     @field_validator("input")
@@ -357,25 +357,14 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
 
 
 def _run_post_sync(r: PostRequest) -> None:
-    from run_post_pipeline import run_collect, run_dedup as post_run_dedup
+    from run_post_pipeline import run_dedup as post_run_dedup
 
     input_dir = _resolve_safe(r.input)
     if not input_dir.exists():
         raise FileNotFoundError(f"input folder not found: {input_dir}")
 
-    final_dir = input_dir / 'final'
-
-    if r.skip_collect:
-        if not final_dir.exists():
-            raise FileNotFoundError(
-                f"{final_dir} does not exist; run without skip_collect first."
-            )
-    else:
-        final_dir = run_collect(input_dir)
-        _job_ctl.check_cancel()
-
     if not r.skip_dedup:
-        post_run_dedup(final_dir)
+        post_run_dedup(input_dir, r.crops or None)
 
 
 def _run_full_sync(r: FullRequest) -> None:
@@ -386,7 +375,7 @@ def _run_full_sync(r: FullRequest) -> None:
         load_candidates, load_best_cfg, slug,
         DEFAULT_CORPUS,
     )
-    from run_post_pipeline import run_collect, run_dedup as post_run_dedup
+    from run_post_pipeline import run_dedup as post_run_dedup
 
     # Resolve crop list
     if r.crops:
@@ -500,8 +489,7 @@ def _run_full_sync(r: FullRequest) -> None:
 
     # Post-pipeline
     if not r.skip_post_pipeline:
-        final_dir = run_collect(out_base)
-        post_run_dedup(final_dir)
+        post_run_dedup(out_base, crops)
 
     if failed:
         raise RuntimeError(f"The following crops failed: {', '.join(failed)}")
@@ -611,17 +599,18 @@ def app_data_tree():
         for state_dir in sorted(repair_dir.iterdir()):
             if not state_dir.is_dir():
                 continue
-            final_dir = state_dir / "final"
-            if not final_dir.exists():
-                continue
-            for p in sorted(final_dir.iterdir()):
-                if not p.is_file():
+            for crop_dir in sorted(state_dir.iterdir()):
+                if not crop_dir.is_dir() or crop_dir.name == 'final':
                     continue
-                if p.name.startswith("dedup_") or p.name.startswith("phase_"):
-                    entry = _file_entry(p)
-                    entry["state"] = state_dir.name
-                    entry["folderPath"] = str(final_dir.relative_to(APP_DATA))
-                    final_csvs.append(entry)
+                for p in sorted(crop_dir.iterdir()):
+                    if not p.is_file():
+                        continue
+                    if p.name.startswith("dedup_") or p.name.startswith("phase_"):
+                        entry = _file_entry(p)
+                        entry["state"] = state_dir.name
+                        entry["crop"] = crop_dir.name
+                        entry["folderPath"] = str(crop_dir.relative_to(APP_DATA))
+                        final_csvs.append(entry)
 
     return {
         "all_csvs": all_csvs,
