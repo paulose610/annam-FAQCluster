@@ -1,10 +1,9 @@
-import { useRef, useState } from 'react';
-import { RefreshCw, Upload, Trash2, Download, CheckSquare, Square, X } from 'lucide-react';
+import { useState } from 'react';
+import { RefreshCw, Trash2, Download, CheckSquare, Square, X } from 'lucide-react';
 import FileGroup from './FileGroup.jsx';
-import { uploadFile, deleteFile, downloadUrl } from '../../api.js';
+import { uploadFile, uploadPopFile, deleteFile, downloadUrl, createPopFolder, popDownloadUrl } from '../../api.js';
 
-export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode }) {
-  const inputRef = useRef(null);
+export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode, popDataFiles, onPopRefresh }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
@@ -12,20 +11,6 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
   function handleRefresh() {
     setRefreshKey((k) => k + 1);
     onRefresh();
-  }
-
-  function handleUploadClick() {
-    inputRef.current.click();
-  }
-
-  function handleFileChange(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    uploadFile(formData)
-      .then(() => { handleRefresh(); e.target.value = ''; })
-      .catch((err) => { console.error('Upload failed:', err); e.target.value = ''; });
   }
 
   function toggleSelectMode() {
@@ -70,6 +55,28 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
     }
   }
 
+  function handleUploadFAQ(file, dest = '') {
+    const fd = new FormData();
+    fd.append('file', file);
+    uploadFile(fd, dest)
+      .then(handleRefresh)
+      .catch((err) => console.error('Upload failed:', err));
+  }
+
+  function handleUploadPOP(file, dest = '') {
+    const fd = new FormData();
+    fd.append('file', file);
+    uploadPopFile(fd, dest)
+      .then(() => { if (onPopRefresh) onPopRefresh(); })
+      .catch((err) => console.error('POP upload failed:', err));
+  }
+
+  function handleCreatePopFolder(path) {
+    createPopFolder(path)
+      .then(() => { if (onPopRefresh) onPopRefresh(); })
+      .catch((err) => console.error('Create folder failed:', err));
+  }
+
   const sharedProps = {
     onDeleted: handleRefresh,
     pickMode,
@@ -80,10 +87,19 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
     refreshKey,
   };
 
+  const popSharedProps = {
+    onDeleted: onPopRefresh || handleRefresh,
+    pickMode: null,
+    onPick: () => {},
+    selectMode: false,
+    selectedPaths: new Set(),
+    onToggleSelect: () => {},
+    refreshKey,
+    downloadUrlFn: popDownloadUrl,
+  };
+
   return (
     <div className="flex flex-col h-full">
-      <input ref={inputRef} type="file" style={{ display: 'none' }} onChange={handleFileChange} />
-
       {/* Pick-mode banner */}
       {pickMode && (
         <div className="flex items-center justify-between px-3 py-1.5 bg-primary/10 border-b border-primary/30 text-xs text-primary font-medium">
@@ -98,14 +114,7 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
         </div>
       )}
 
-      <div className="p-2 border-b border-border flex items-center gap-1">
-        <button
-          className="flex-1 flex items-center gap-2 px-3 py-2 border border-dashed border-border rounded-md text-sm text-muted-foreground bg-input hover:border-primary hover:bg-primary/5 hover:text-primary transition-colors"
-          onClick={handleUploadClick}
-        >
-          <Upload size={14} />
-          Upload file
-        </button>
+      <div className="p-2 border-b border-border flex items-center justify-end gap-1">
         <button
           className={`flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-md transition-colors ${selectMode ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-accent hover:text-foreground'}`}
           onClick={toggleSelectMode}
@@ -142,19 +151,35 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode 
         </button>
       </div>
 
-      <FileGroup label="Input CSVs" files={fileTree.all_csvs || []} showPath {...sharedProps} />
+      <FileGroup
+        label="Input CSVs"
+        files={fileTree.all_csvs || []}
+        showPath
+        onUpload={handleUploadFAQ}
+        {...sharedProps}
+      />
       <FileGroup
         label="Crop QA Files"
         files={fileTree.crop_qa_files || []}
         groupBy="state"
         basePath="outputs/repair"
+        onUpload={handleUploadFAQ}
         {...sharedProps}
       />
       <FileGroup
         label="Final CSVs"
         files={fileTree.final_csvs || []}
         groupBy="state"
+        onUpload={handleUploadFAQ}
         {...sharedProps}
+      />
+      <FileGroup
+        label="POP Docs"
+        files={popDataFiles || []}
+        showPath
+        onUpload={handleUploadPOP}
+        onCreateFolder={handleCreatePopFolder}
+        {...popSharedProps}
       />
     </div>
   );

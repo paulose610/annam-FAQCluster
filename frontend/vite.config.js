@@ -11,6 +11,8 @@ export default defineConfig({
       '/run': 'http://localhost:8030',
       '/jobs': 'http://localhost:8030',
       '/files': 'http://localhost:8030',
+      '/folders': 'http://localhost:8030',
+      '/pop': 'http://localhost:8030',
     },
   },
 });

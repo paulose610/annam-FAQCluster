@@ -1,12 +1,13 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { ChevronDown, ChevronRight, Folder, MoreHorizontal } from 'lucide-react';
 import FileRow from './FileRow.jsx';
 import { deleteFolder, renameFile } from '../../api.js';
 
-function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = false }) {
+function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = false, onUpload }) {
   const [open, setOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [newName, setNewName] = useState('');
+  const fileInputRef = useRef(null);
 
   function handleDelete(e) {
     e.stopPropagation();
@@ -36,6 +37,19 @@ function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = fa
       .catch((err) => { console.error('Rename folder failed:', err); setRenaming(false); });
   }
 
+  function handleUploadClick(e) {
+    e.stopPropagation();
+    setOpen(false);
+    fileInputRef.current?.click();
+  }
+
+  function handleFileSelected(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    onUpload?.(file);
+    e.target.value = '';
+  }
+
   if (renaming) {
     return (
       <input
@@ -53,6 +67,7 @@ function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = fa
 
   return (
     <div className="relative flex-shrink-0" onMouseLeave={() => setOpen(false)}>
+      {onUpload && <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={handleFileSelected} />}
       <button
         className="w-5 h-5 flex items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
         onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
@@ -61,7 +76,15 @@ function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = fa
         <MoreHorizontal size={11} />
       </button>
       {open && (
-        <div className="absolute right-0 top-full z-20 mt-0.5 w-28 bg-popover border border-border rounded-md shadow-lg py-1">
+        <div className="absolute right-0 top-full z-20 mt-0.5 w-32 bg-popover border border-border rounded-md shadow-lg py-1">
+          {onUpload && (
+            <button
+              className="w-full text-left px-3 py-1.5 text-xs text-foreground hover:bg-accent"
+              onClick={handleUploadClick}
+            >
+              Upload file
+            </button>
+          )}
           <button
             className="w-full text-left px-3 py-1.5 text-xs text-foreground hover:bg-accent"
             onClick={startRename}
@@ -83,26 +106,34 @@ function FolderMenu({ path, name, onDeleted, node, folderKeys, forceConfirm = fa
 function buildTree(files) {
   const root = { folders: {}, files: [] };
   for (const file of files) {
-    if (file.path.split('/').includes('.ipynb_checkpoints')) continue;
-    const parts = file.path.split('/');
+    const displayPath = file.treePath || file.path;
+    if (displayPath.split('/').includes('.ipynb_checkpoints')) continue;
+    const parts = displayPath.split('/');
     let node = root;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const part = parts[i];
-      if (!node.folders[part]) node.folders[part] = { folders: {}, files: [] };
-      node = node.folders[part];
+    if (file.isDir) {
+      for (const part of parts) {
+        if (!node.folders[part]) node.folders[part] = { folders: {}, files: [] };
+        node = node.folders[part];
+      }
+    } else {
+      for (let i = 0; i < parts.length - 1; i++) {
+        const part = parts[i];
+        if (!node.folders[part]) node.folders[part] = { folders: {}, files: [] };
+        node = node.folders[part];
+      }
+      node.files.push(file);
     }
-    node.files.push(file);
   }
   return root;
 }
 
-function TreeNode({ name, node, depth, path, onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect }) {
+function TreeNode({ name, node, depth, path, onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn, onUpload }) {
   const [open, setOpen] = useState(false);
   const isRoot = !name;
   const folderKeys = Object.keys(node.folders).sort();
   const indent = 8 + depth * 18;
 
-  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect };
+  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn };
 
   return (
     <>
@@ -117,7 +148,14 @@ function TreeNode({ name, node, depth, path, onDeleted, pickMode, onPick, select
           </span>
           <Folder size={12} className="flex-shrink-0 text-muted-foreground/60" />
           <span className="truncate flex-1">{name}</span>
-          <FolderMenu path={path} name={name} onDeleted={onDeleted} node={node} folderKeys={folderKeys} />
+          <FolderMenu
+            path={path}
+            name={name}
+            onDeleted={onDeleted}
+            node={node}
+            folderKeys={folderKeys}
+            onUpload={onUpload ? (file) => onUpload(file, path) : undefined}
+          />
         </div>
       )}
       {(isRoot || open) && (
@@ -129,6 +167,7 @@ function TreeNode({ name, node, depth, path, onDeleted, pickMode, onPick, select
               node={node.folders[k]}
               depth={isRoot ? depth : depth + 1}
               path={path ? `${path}/${k}` : k}
+              onUpload={onUpload}
               {...rowProps}
             />
           ))}
@@ -146,10 +185,10 @@ function TreeNode({ name, node, depth, path, onDeleted, pickMode, onPick, select
   );
 }
 
-function SubGroup({ label, files, folderPath, onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect }) {
+function SubGroup({ label, files, folderPath, onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn, onUpload }) {
   const [open, setOpen] = useState(false);
 
-  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect };
+  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn };
 
   return (
     <>
@@ -162,7 +201,13 @@ function SubGroup({ label, files, folderPath, onDeleted, pickMode, onPick, selec
         </span>
         <Folder size={12} className="flex-shrink-0 text-muted-foreground/60" />
         <span className="truncate flex-1">{label}</span>
-        <FolderMenu path={folderPath} name={label} onDeleted={onDeleted} forceConfirm={files.length > 0} />
+        <FolderMenu
+          path={folderPath}
+          name={label}
+          onDeleted={onDeleted}
+          forceConfirm={files.length > 0}
+          onUpload={onUpload ? (file) => onUpload(file, folderPath) : undefined}
+        />
       </div>
       {open &&
         files.map((file) => (
@@ -174,11 +219,43 @@ function SubGroup({ label, files, folderPath, onDeleted, pickMode, onPick, selec
 
 export default function FileGroup({
   label, files, onDeleted, groupBy, showPath = false, basePath, refreshKey,
-  pickMode, onPick, selectMode, selectedPaths, onToggleSelect,
+  pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn,
+  onUpload,
+  onCreateFolder,
 }) {
   const [open, setOpen] = useState(true);
+  const [groupMenuOpen, setGroupMenuOpen] = useState(false);
+  const [showFolderInput, setShowFolderInput] = useState(false);
+  const [folderName, setFolderName] = useState('');
+  const fileInputRef = useRef(null);
 
-  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect };
+  const rowProps = { onDeleted, pickMode, onPick, selectMode, selectedPaths, onToggleSelect, downloadUrlFn };
+
+  function handleGroupUploadClick(e) {
+    e.stopPropagation();
+    setGroupMenuOpen(false);
+    fileInputRef.current?.click();
+  }
+
+  function handleGroupFileSelected(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    onUpload?.(file, '');
+    e.target.value = '';
+  }
+
+  function handleCreateFolderClick(e) {
+    e.stopPropagation();
+    setGroupMenuOpen(false);
+    setShowFolderInput(true);
+  }
+
+  function commitFolder() {
+    const trimmed = folderName.trim();
+    if (trimmed) onCreateFolder?.(trimmed);
+    setFolderName('');
+    setShowFolderInput(false);
+  }
 
   let content = null;
   if (open) {
@@ -187,7 +264,7 @@ export default function FileGroup({
         content = <div className="px-4 py-2 text-xs text-muted-foreground/60 italic">No files</div>;
       } else {
         const tree = buildTree(files);
-        content = <TreeNode key={refreshKey} name={null} node={tree} depth={0} path="" {...rowProps} />;
+        content = <TreeNode key={refreshKey} name={null} node={tree} depth={0} path="" onUpload={onUpload} {...rowProps} />;
       }
     } else if (groupBy) {
       const groups = {};
@@ -203,13 +280,14 @@ export default function FileGroup({
         content = keys.map((k) => {
           const fp = groups[k][0]?.folderPath || (basePath ? `${basePath}/${k}` : k);
           return (
-          <SubGroup
-            key={`${refreshKey}-${k}`}
-            label={k}
-            files={groups[k]}
-            folderPath={fp}
-            {...rowProps}
-          />
+            <SubGroup
+              key={`${refreshKey}-${k}`}
+              label={k}
+              files={groups[k]}
+              folderPath={fp}
+              onUpload={onUpload}
+              {...rowProps}
+            />
           );
         });
       }
@@ -227,14 +305,68 @@ export default function FileGroup({
   return (
     <>
       <div
-        className="flex items-center gap-1.5 px-3 py-2 cursor-pointer bg-muted hover:bg-accent transition-colors border-y border-border"
+        className="flex items-center gap-1.5 px-3 py-2 cursor-pointer bg-muted hover:bg-accent transition-colors border-y border-border group"
         onClick={() => setOpen((v) => !v)}
       >
         <span className="text-muted-foreground/60 flex-shrink-0">
           {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </span>
-        <span className="text-xs font-semibold text-foreground/70 uppercase tracking-wider">{label}</span>
+        <span className="text-xs font-semibold text-foreground/70 uppercase tracking-wider flex-1">{label}</span>
+        {(onUpload || onCreateFolder) && (
+          <div className="relative flex-shrink-0" onMouseLeave={() => setGroupMenuOpen(false)}>
+            {onUpload && (
+              <input ref={fileInputRef} type="file" style={{ display: 'none' }} onChange={handleGroupFileSelected} />
+            )}
+            <button
+              className="w-5 h-5 flex items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
+              onClick={(e) => { e.stopPropagation(); setGroupMenuOpen((v) => !v); }}
+              title="More options"
+            >
+              <MoreHorizontal size={12} />
+            </button>
+            {groupMenuOpen && (
+              <div className="absolute right-0 top-full z-20 mt-0.5 w-32 bg-popover border border-border rounded-md shadow-lg py-1">
+                {onUpload && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 text-xs text-foreground hover:bg-accent"
+                    onClick={handleGroupUploadClick}
+                  >
+                    Upload file
+                  </button>
+                )}
+                {onCreateFolder && (
+                  <button
+                    className="w-full text-left px-3 py-1.5 text-xs text-foreground hover:bg-accent"
+                    onClick={handleCreateFolderClick}
+                  >
+                    New folder
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
+      {showFolderInput && (
+        <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border bg-muted/40">
+          <input
+            autoFocus
+            type="text"
+            className="flex-1 bg-input border border-border rounded-md px-2 py-1 text-xs text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-1 focus:ring-ring"
+            placeholder="state/crop"
+            value={folderName}
+            onChange={(e) => setFolderName(e.target.value)}
+            onBlur={commitFolder}
+            onKeyDown={(e) => { if (e.key === 'Enter') commitFolder(); if (e.key === 'Escape') { setShowFolderInput(false); setFolderName(''); } }}
+          />
+          <button
+            className="flex-shrink-0 px-2 py-1 text-xs bg-primary text-primary-foreground rounded-md hover:bg-primary/90 transition-colors"
+            onClick={commitFolder}
+          >
+            Create
+          </button>
+        </div>
+      )}
       {content}
     </>
   );

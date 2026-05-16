@@ -5,7 +5,7 @@ import { toast } from 'sonner';
 const inputClass =
   'w-full bg-input border border-border rounded-md px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-ring transition-shadow';
 
-function MultiSelector({ value, onChange, names, placeholder }) {
+export function MultiSelector({ value, onChange, names, placeholder }) {
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -157,7 +157,7 @@ function MultiSelector({ value, onChange, names, placeholder }) {
   );
 }
 
-function StateSelector({ value, onChange, stateNames }) {
+export function StateSelector({ value, onChange, stateNames }) {
   const [search, setSearch] = useState('');
   const [open, setOpen] = useState(false);
   const [highlightedIndex, setHighlightedIndex] = useState(-1);

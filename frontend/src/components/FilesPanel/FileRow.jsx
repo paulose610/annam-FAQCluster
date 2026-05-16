@@ -11,6 +11,7 @@ export default function FileRow({
   selectMode,
   selectedPaths,
   onToggleSelect,
+  downloadUrlFn,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -98,7 +99,7 @@ export default function FileRow({
         <>
           <a
             className="flex-shrink-0 w-6 h-6 flex items-center justify-center rounded text-muted-foreground/60 hover:bg-muted hover:text-foreground transition-colors opacity-0 group-hover:opacity-100"
-            href={downloadUrl(file.path)}
+            href={(downloadUrlFn ?? downloadUrl)(file.path)}
             download={file.name}
             onClick={(e) => e.stopPropagation()}
             title="Download"

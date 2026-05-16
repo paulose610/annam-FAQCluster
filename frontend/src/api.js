@@ -40,11 +40,15 @@ export async function deleteFolder(path) {
   return _handleResponse(res);
 }
 
-export async function uploadFile(formData) {
-  const res = await fetch('/files/upload', {
-    method: 'POST',
-    body: formData,
-  });
+export async function uploadFile(formData, dest = '') {
+  const url = dest ? `/files/upload?dest=${encodeURIComponent(dest)}` : '/files/upload';
+  const res = await fetch(url, { method: 'POST', body: formData });
+  return _handleResponse(res);
+}
+
+export async function uploadPopFile(formData, dest = '') {
+  const url = dest ? `/pop/upload?dest=${encodeURIComponent(dest)}` : '/pop/upload';
+  const res = await fetch(url, { method: 'POST', body: formData });
   return _handleResponse(res);
 }
 
@@ -102,4 +106,53 @@ export async function runFull(body) {
     body: JSON.stringify(body),
   });
   return _handleResponse(res);
+}
+
+// --- POP Translation ---
+
+export async function getPopStates() {
+  const res = await fetch('/pop/states');
+  return _handleResponse(res);
+}
+
+export async function getPopCrops(state) {
+  const res = await fetch(`/pop/crops?state=${encodeURIComponent(state)}`);
+  return _handleResponse(res);
+}
+
+export async function getPopDocs(state, crop) {
+  const res = await fetch(`/pop/docs?state=${encodeURIComponent(state)}&crop=${encodeURIComponent(crop)}`);
+  return _handleResponse(res);
+}
+
+export async function getPopDataTree() {
+  const res = await fetch('/pop/data/tree');
+  return _handleResponse(res);
+}
+
+export async function getPopOutputTree() {
+  const res = await fetch('/pop/output/tree');
+  return _handleResponse(res);
+}
+
+export async function runPop(body) {
+  const res = await fetch('/run/pop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return _handleResponse(res);
+}
+
+export async function createPopFolder(path) {
+  const res = await fetch('/pop/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  return _handleResponse(res);
+}
+
+export function popDownloadUrl(path) {
+  return `/pop/download/${path}`;
 }

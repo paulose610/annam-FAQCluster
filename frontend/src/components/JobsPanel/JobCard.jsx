@@ -43,8 +43,15 @@ export default function JobCard({ job, onDelete, onStop, isExpanded, onToggle })
     onStop(job.job_id);
   }
 
+  const JOB_TYPE_LABELS = {
+    pre: 'Pre-Pipeline',
+    pipeline: 'Pipeline',
+    post: 'Post-Pipeline',
+    full: 'Full Pipeline',
+    pop: 'POP Translation',
+  };
   const typeLabel = job.job_type_id != null
-    ? `#${job.job_type_id} ${job.job_type ?? ''}`
+    ? `#${job.job_type_id} ${JOB_TYPE_LABELS[job.job_type] ?? job.job_type ?? ''}`
     : null;
 
   const borderColor = STATUS_BORDER[job.status] || STATUS_BORDER.pending;
