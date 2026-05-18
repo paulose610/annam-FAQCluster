@@ -13,6 +13,7 @@ export default defineConfig({
       '/files': 'http://localhost:8030',
       '/folders': 'http://localhost:8030',
       '/pop': 'http://localhost:8030',
+      '/app': 'http://localhost:8030',
     },
   },
 });

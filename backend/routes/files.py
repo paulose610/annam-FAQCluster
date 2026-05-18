@@ -1,11 +1,14 @@
 import shutil
+import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
 from backend.common import APP_DATA, _resolve_safe
+
+_CHUNK_TMP = Path(tempfile.gettempdir()) / "faq_chunks"
 
 router = APIRouter()
 
@@ -49,6 +52,8 @@ def app_data_tree():
     final_root = APP_DATA / "final"
 
     all_csvs = []
+    # Directories that contain at least one CSV (used to find empty dirs below)
+    csv_ancestor_dirs: set[Path] = set()
     if APP_DATA.exists():
         for p in APP_DATA.rglob("*.csv"):
             if ".ipynb_checkpoints" in p.parts:
@@ -64,7 +69,43 @@ def app_data_tree():
             except ValueError:
                 pass
             all_csvs.append(_file_entry(p))
+            for ancestor in p.parents:
+                if ancestor == APP_DATA:
+                    break
+                csv_ancestor_dirs.add(ancestor)
     all_csvs.sort(key=lambda e: e["path"])
+
+    # Emit empty directories so users can upload into them
+    def _add_empty_dirs(d: Path) -> None:
+        if ".ipynb_checkpoints" in d.parts or d.name.startswith('.'):
+            return
+        try:
+            d.relative_to(outputs_dir)
+            return
+        except ValueError:
+            pass
+        try:
+            d.relative_to(final_root)
+            return
+        except ValueError:
+            pass
+        if d not in csv_ancestor_dirs:
+            # No CSV descendants — show as an empty folder
+            all_csvs.append({
+                "name": d.name,
+                "path": str(d.relative_to(APP_DATA)),
+                "size": 0,
+                "isDir": True,
+            })
+        else:
+            for sub in sorted(d.iterdir()):
+                if sub.is_dir():
+                    _add_empty_dirs(sub)
+
+    if APP_DATA.exists():
+        for d in sorted(APP_DATA.iterdir()):
+            if d.is_dir():
+                _add_empty_dirs(d)
 
     crop_qa_files = []
     if repair_dir.exists():
@@ -143,6 +184,48 @@ def rename_file(path: str, body: RenameRequest):
     dest.parent.mkdir(parents=True, exist_ok=True)
     source.rename(dest)
     return {"from": path, "to": body.to}
+
+
+@router.post("/files/folders")
+def create_folder(body: dict):
+    """Create a folder inside app-data. Body: {"path": "relative/path"}."""
+    rel_path = body.get("path", "")
+    if not rel_path:
+        raise HTTPException(status_code=400, detail="path is required")
+    target = _resolve_safe(rel_path)
+    target.mkdir(parents=True, exist_ok=True)
+    return {"created": rel_path}
+
+
+@router.post("/files/upload-chunk")
+async def upload_file_chunk(
+    request: Request,
+    upload_id: str,
+    chunk_index: int,
+    total_chunks: int,
+    filename: str,
+    dest: str = "",
+):
+    """Receive one raw-binary chunk; assemble file when all chunks arrive."""
+    tmp_dir = _CHUNK_TMP / upload_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_dir / f"{chunk_index:06d}").write_bytes(await request.body())
+
+    if not all((tmp_dir / f"{i:06d}").exists() for i in range(total_chunks)):
+        return {"chunk": chunk_index, "total": total_chunks}
+
+    save_dir = _resolve_safe(dest) if dest else APP_DATA
+    save_dir.mkdir(parents=True, exist_ok=True)
+    target = (save_dir / filename).resolve()
+    if not target.is_relative_to(APP_DATA.resolve()):
+        shutil.rmtree(tmp_dir)
+        raise HTTPException(status_code=400, detail="path escapes sandbox")
+
+    with target.open("wb") as f:
+        for i in range(total_chunks):
+            f.write((tmp_dir / f"{i:06d}").read_bytes())
+    shutil.rmtree(tmp_dir)
+    return {"uploaded": str(target.relative_to(APP_DATA))}
 
 
 @router.post("/files/upload")

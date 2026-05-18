@@ -12,6 +12,11 @@ async function _handleResponse(res) {
   return res.json();
 }
 
+export async function getAppTree() {
+  const res = await fetch('/app/tree');
+  return _handleResponse(res);
+}
+
 export async function getTree() {
   const res = await fetch('/files/tree');
   return _handleResponse(res);
@@ -40,16 +45,61 @@ export async function deleteFolder(path) {
   return _handleResponse(res);
 }
 
-export async function uploadFile(formData, dest = '') {
-  const url = dest ? `/files/upload?dest=${encodeURIComponent(dest)}` : '/files/upload';
-  const res = await fetch(url, { method: 'POST', body: formData });
+export async function createFolder(path) {
+  const res = await fetch('/files/folders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
   return _handleResponse(res);
 }
 
-export async function uploadPopFile(formData, dest = '') {
+const _CHUNK_SIZE = 800 * 1024; // 800 KB — safely under dev-tunnel nginx 1 MB limit
+
+async function _uploadChunked(file, dest, chunkEndpoint, onProgress) {
+  const totalChunks = Math.ceil(file.size / _CHUNK_SIZE);
+  const uploadId = crypto.randomUUID();
+  let result;
+  for (let i = 0; i < totalChunks; i++) {
+    const chunk = file.slice(i * _CHUNK_SIZE, Math.min((i + 1) * _CHUNK_SIZE, file.size));
+    const params = new URLSearchParams({
+      upload_id: uploadId,
+      chunk_index: String(i),
+      total_chunks: String(totalChunks),
+      filename: file.name,
+      dest: dest || '',
+    });
+    const res = await fetch(`${chunkEndpoint}?${params}`, {
+      method: 'POST',
+      body: chunk,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    });
+    result = await _handleResponse(res);
+    onProgress?.(Math.round((i + 1) / totalChunks * 100));
+  }
+  return result;
+}
+
+export async function uploadFile(file, dest = '', onProgress) {
+  if (file.size > _CHUNK_SIZE) return _uploadChunked(file, dest, '/files/upload-chunk', onProgress);
+  const fd = new FormData();
+  fd.append('file', file);
+  const url = dest ? `/files/upload?dest=${encodeURIComponent(dest)}` : '/files/upload';
+  const res = await fetch(url, { method: 'POST', body: fd });
+  const result = await _handleResponse(res);
+  onProgress?.(100);
+  return result;
+}
+
+export async function uploadPopFile(file, dest = '', onProgress) {
+  if (file.size > _CHUNK_SIZE) return _uploadChunked(file, dest, '/pop/upload-chunk', onProgress);
+  const fd = new FormData();
+  fd.append('file', file);
   const url = dest ? `/pop/upload?dest=${encodeURIComponent(dest)}` : '/pop/upload';
-  const res = await fetch(url, { method: 'POST', body: formData });
-  return _handleResponse(res);
+  const res = await fetch(url, { method: 'POST', body: fd });
+  const result = await _handleResponse(res);
+  onProgress?.(100);
+  return result;
 }
 
 export async function getJobs() {
@@ -155,4 +205,14 @@ export async function createPopFolder(path) {
 
 export function popDownloadUrl(path) {
   return `/pop/download/${path}`;
+}
+
+export async function deletePopFile(path) {
+  const res = await fetch(`/pop/files/${path}`, { method: 'DELETE' });
+  return _handleResponse(res);
+}
+
+export async function deletePopFolder(path) {
+  const res = await fetch(`/pop/folders/${path}`, { method: 'DELETE' });
+  return _handleResponse(res);
 }

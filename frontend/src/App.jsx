@@ -5,19 +5,24 @@ import FilesPanel from './components/FilesPanel/FilesPanel.jsx';
 import FunctionsPanel from './components/FunctionsPanel/FunctionsPanel.jsx';
 import PopTranslationPanel from './components/FunctionsPanel/PopTranslationPanel.jsx';
 import JobsPanel from './components/JobsPanel/JobsPanel.jsx';
-import { getTree, getJobs, deleteJob, stopJob, getPopDataTree } from './api.js';
+import { getAppTree, getJobs, deleteJob, stopJob } from './api.js';
+
+const _EMPTY_TREE = { all_csvs: [], crop_qa_files: [], final_csvs: [], pop_files: [] };
 
 export default function App() {
-  const [fileTree, setFileTree] = useState({ all_csvs: [], crop_qa_files: [], final_csvs: [] });
+  const [appTree, setAppTree] = useState(_EMPTY_TREE);
   const [jobs, setJobs] = useState([]);
   const [pickMode, setPickMode] = useState(null);
   const [activeTab, setActiveTab] = useState('faq-cluster');
-  const [popDataFiles, setPopDataFiles] = useState([]);
+
+  function handleRefresh() {
+    getAppTree()
+      .then(setAppTree)
+      .catch((err) => console.error('Failed to load tree:', err));
+  }
 
   useEffect(() => {
-    getTree()
-      .then(setFileTree)
-      .catch((err) => console.error('Failed to load file tree:', err));
+    handleRefresh();
   }, []);
 
   function handleRefreshJobs() {
@@ -48,23 +53,7 @@ export default function App() {
       .catch((err) => console.error('Failed to stop job:', err));
   }
 
-  function handleFileDeleted() {
-    getTree()
-      .then(setFileTree)
-      .catch((err) => console.error('Failed to refresh file tree:', err));
-  }
-
-  function handlePopRefresh() {
-    getPopDataTree()
-      .then((data) => setPopDataFiles(data.files || []))
-      .catch((err) => console.error('Failed to load POP data tree:', err));
-  }
-
-  useEffect(() => {
-    handlePopRefresh();
-  }, []);
-
-  const repairDirs = [...new Set((fileTree.crop_qa_files || []).map((f) => f.state))]
+  const repairDirs = [...new Set((appTree.crop_qa_files || []).map((f) => f.state))]
     .sort()
     .map((s) => ({ name: s, path: `outputs/repair/${s}` }));
 
@@ -80,12 +69,11 @@ export default function App() {
       <div className="flex flex-1 overflow-hidden">
         <div className={`w-60 flex-shrink-0 overflow-y-auto border-r border-border bg-card scrollbar-hide${pickMode ? ' ring-2 ring-primary' : ''}`}>
           <FilesPanel
-            fileTree={fileTree}
-            onRefresh={handleFileDeleted}
+            fileTree={appTree}
+            onRefresh={handleRefresh}
             pickMode={pickMode}
             setPickMode={setPickMode}
-            popDataFiles={popDataFiles}
-            onPopRefresh={handlePopRefresh}
+            popDataFiles={appTree.pop_files || []}
           />
         </div>
         <div className="flex-1 overflow-y-auto bg-background flex flex-col">

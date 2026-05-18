@@ -1,16 +1,20 @@
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import List, Optional
 
 import _job_ctl
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from backend.common import POP_WORK_DIR, ROOT_DIR, _resolve_any_safe
 from backend.jobs import _submit
+
+_CHUNK_TMP = Path(tempfile.gettempdir()) / "faq_chunks"
 
 router = APIRouter()
 
@@ -62,54 +66,71 @@ def get_pop_docs(state: str, crop: str):
 @router.get("/pop/data/tree")
 def get_pop_data_tree():
     """
-    Returns two kinds of entries under POP_Work/Data/:
-    - Original PDFs at {state}/{crop}/{pdf_name} — shown inside the doc folder if processed
-    - Output .docx files shown as 'output' directly under {state}/{crop}/{doc_name}/
-
+    Recursively scans POP_Work/Data/ at any depth.
+    - PDFs: shown at their actual location; if a same-stem subdir exists they're
+      nested one level deeper (showing the processed-doc virtual folder).
+    - .docx files inside final_output/ subdirs are shown as 'output' entries.
     `path` is always relative to POP_Work/ (for downloads).
-    `treePath` is a virtual path used by the frontend tree builder for display grouping.
+    `treePath` is a virtual path used by the frontend tree builder.
     """
     data_dir = POP_WORK_DIR / "Data"
     if not data_dir.exists():
         return {"files": []}
     entries = []
-    for state_dir in sorted(data_dir.iterdir()):
-        if not state_dir.is_dir():
-            continue
-        for crop_dir in sorted(state_dir.iterdir()):
-            if not crop_dir.is_dir():
-                continue
-            s, c = state_dir.name, crop_dir.name
-            processed_stems = {d.name for d in crop_dir.iterdir() if d.is_dir()}
 
-            # Original uploaded PDFs
-            for pdf in sorted(crop_dir.glob("*.pdf")):
-                if pdf.stem in processed_stems:
-                    tree_path = f"{s}/{c}/{pdf.stem}/{pdf.name}"
-                else:
-                    tree_path = f"{s}/{c}/{pdf.name}"
-                entries.append({
-                    "name": pdf.name,
-                    "path": str(pdf.relative_to(POP_WORK_DIR)),
-                    "treePath": tree_path,
-                    "size": pdf.stat().st_size,
-                })
-
-            # Output docs — flattened: shown directly under doc folder, no final_output level
-            for doc_dir in sorted(crop_dir.iterdir()):
-                if not doc_dir.is_dir():
-                    continue
-                final_output = doc_dir / "final_output"
-                if not final_output.is_dir():
-                    continue
+    def scan(directory: Path) -> None:
+        subdirs = [d for d in sorted(directory.iterdir()) if d.is_dir() and not d.name.startswith('.')]
+        processed_stems = {d.name for d in subdirs}
+        for pdf in sorted(directory.glob("*.pdf")):
+            rel = pdf.relative_to(data_dir)
+            if pdf.stem in processed_stems:
+                tree_path = str(rel.parent / pdf.stem / pdf.name)
+            else:
+                tree_path = str(rel)
+            entries.append({
+                "name": pdf.name,
+                "path": str(pdf.relative_to(POP_WORK_DIR)),
+                "treePath": tree_path,
+                "size": pdf.stat().st_size,
+            })
+        for sub in subdirs:
+            final_output = sub / "final_output"
+            if final_output.is_dir():
+                rel_sub = sub.relative_to(data_dir)
                 for docx in sorted(final_output.glob("*.docx")):
                     entries.append({
                         "name": docx.name,
                         "displayName": "output",
                         "path": str(docx.relative_to(POP_WORK_DIR)),
-                        "treePath": f"{s}/{c}/{doc_dir.name}/output.docx",
+                        "treePath": str(rel_sub / "output.docx"),
                         "size": docx.stat().st_size,
                     })
+            else:
+                before = len(entries)
+                scan(sub)
+                if len(entries) == before:
+                    # Subdir is empty — emit it so user can upload into it
+                    rel_sub = sub.relative_to(data_dir)
+                    entries.append({
+                        "name": sub.name,
+                        "path": str(sub.relative_to(POP_WORK_DIR)),
+                        "treePath": str(rel_sub),
+                        "size": 0,
+                        "isDir": True,
+                    })
+
+    for state_dir in sorted(data_dir.iterdir()):
+        if state_dir.is_dir() and not state_dir.name.startswith('.'):
+            before = len(entries)
+            scan(state_dir)
+            if len(entries) == before:
+                entries.append({
+                    "name": state_dir.name,
+                    "path": str(state_dir.relative_to(POP_WORK_DIR)),
+                    "treePath": state_dir.name,
+                    "size": 0,
+                    "isDir": True,
+                })
     return {"files": entries}
 
 
@@ -128,6 +149,42 @@ def get_pop_output_tree():
                 "size": p.stat().st_size,
             })
     return {"files": files}
+
+
+@router.post("/pop/upload-chunk")
+async def upload_pop_file_chunk(
+    request: Request,
+    upload_id: str,
+    chunk_index: int,
+    total_chunks: int,
+    filename: str,
+    dest: str = "",
+):
+    """Receive one raw-binary chunk; assemble file when all chunks arrive."""
+    base = POP_WORK_DIR / "Data"
+    tmp_dir = _CHUNK_TMP / upload_id
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_dir / f"{chunk_index:06d}").write_bytes(await request.body())
+
+    if not all((tmp_dir / f"{i:06d}").exists() for i in range(total_chunks)):
+        return {"chunk": chunk_index, "total": total_chunks}
+
+    try:
+        save_dir = _resolve_any_safe(base, dest) if dest else base
+    except ValueError as e:
+        shutil.rmtree(tmp_dir)
+        raise HTTPException(status_code=400, detail=str(e))
+    save_dir.mkdir(parents=True, exist_ok=True)
+    target = (save_dir / filename).resolve()
+    if not target.is_relative_to(base.resolve()):
+        shutil.rmtree(tmp_dir)
+        raise HTTPException(status_code=400, detail="path escapes sandbox")
+
+    with target.open("wb") as f:
+        for i in range(total_chunks):
+            f.write((tmp_dir / f"{i:06d}").read_bytes())
+    shutil.rmtree(tmp_dir)
+    return {"uploaded": str(target.relative_to(base))}
 
 
 @router.post("/pop/upload")
@@ -174,6 +231,36 @@ def download_pop_file(path: str):
     if not target.exists():
         raise HTTPException(status_code=404, detail="file not found")
     return FileResponse(str(target), filename=target.name)
+
+
+@router.delete("/pop/files/{path:path}")
+def delete_pop_file(path: str):
+    """Delete a file from POP_Work/ by relative path."""
+    try:
+        target = _resolve_any_safe(POP_WORK_DIR, path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    if target.is_dir():
+        raise HTTPException(status_code=400, detail="path is a directory")
+    target.unlink()
+    return {"deleted": path}
+
+
+@router.delete("/pop/folders/{path:path}")
+def delete_pop_folder(path: str):
+    """Delete a folder (and contents) from POP_Work/ by relative path."""
+    try:
+        target = _resolve_any_safe(POP_WORK_DIR, path)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="folder not found")
+    if not target.is_dir():
+        raise HTTPException(status_code=400, detail="path is not a directory")
+    shutil.rmtree(target)
+    return {"deleted": path}
 
 
 def _run_pop_sync(req: PopRequest) -> None:

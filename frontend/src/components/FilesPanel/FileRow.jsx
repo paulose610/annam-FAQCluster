@@ -12,6 +12,8 @@ export default function FileRow({
   selectedPaths,
   onToggleSelect,
   downloadUrlFn,
+  deleteFileFn = deleteFile,
+  noRename = false,
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -23,7 +25,7 @@ export default function FileRow({
   function handleDelete(e) {
     e.stopPropagation();
     setMenuOpen(false);
-    deleteFile(file.path)
+    deleteFileFn(file.path)
       .then(() => onDeleted())
       .catch((err) => console.error('Delete failed:', err));
   }
@@ -117,17 +119,20 @@ export default function FileRow({
             </button>
             {menuOpen && (
               <div
-                className="absolute right-0 top-full z-20 mt-0.5 w-28 bg-popover border border-border rounded-md shadow-lg py-1"
+                className="absolute right-0 top-full z-20 w-28 bg-popover border border-border rounded-md shadow-lg py-1"
+                style={{ marginTop: '-2px', paddingTop: '6px' }}
                 onMouseLeave={() => setMenuOpen(false)}
               >
+                {!noRename && (
+                  <button
+                    className="w-full text-left px-3 py-2 text-xs text-foreground hover:bg-accent"
+                    onClick={startRename}
+                  >
+                    Rename
+                  </button>
+                )}
                 <button
-                  className="w-full text-left px-3 py-1.5 text-xs text-foreground hover:bg-accent"
-                  onClick={startRename}
-                >
-                  Rename
-                </button>
-                <button
-                  className="w-full text-left px-3 py-1.5 text-xs text-destructive hover:bg-destructive/10"
+                  className="w-full text-left px-3 py-2 text-xs text-destructive hover:bg-destructive/10"
                   onClick={handleDelete}
                 >
                   Delete

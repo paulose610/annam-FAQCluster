@@ -1,12 +1,13 @@
 import { useState } from 'react';
 import { RefreshCw, Trash2, Download, CheckSquare, Square, X } from 'lucide-react';
 import FileGroup from './FileGroup.jsx';
-import { uploadFile, uploadPopFile, deleteFile, downloadUrl, createPopFolder, popDownloadUrl } from '../../api.js';
+import { uploadFile, uploadPopFile, deleteFile, downloadUrl, createFolder, createPopFolder, popDownloadUrl, deletePopFile, deletePopFolder } from '../../api.js';
 
-export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode, popDataFiles, onPopRefresh }) {
+export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode, popDataFiles }) {
   const [refreshKey, setRefreshKey] = useState(0);
   const [selectMode, setSelectMode] = useState(false);
   const [selectedPaths, setSelectedPaths] = useState(new Set());
+  const [uploadProgress, setUploadProgress] = useState(null); // null | { pct: number, name: string }
 
   function handleRefresh() {
     setRefreshKey((k) => k + 1);
@@ -56,26 +57,34 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
   }
 
   function handleUploadFAQ(file, dest = '') {
-    const fd = new FormData();
-    fd.append('file', file);
-    uploadFile(fd, dest)
-      .then(handleRefresh)
-      .catch((err) => console.error('Upload failed:', err));
+    if (uploadProgress) return;
+    setUploadProgress({ pct: 0, name: file.name });
+    uploadFile(file, dest, (pct) => setUploadProgress({ pct, name: file.name }))
+      .then(() => { setUploadProgress(null); handleRefresh(); })
+      .catch((err) => { console.error('Upload failed:', err); setUploadProgress(null); });
   }
 
   function handleUploadPOP(file, dest = '') {
-    const fd = new FormData();
-    fd.append('file', file);
-    uploadPopFile(fd, dest)
-      .then(() => { if (onPopRefresh) onPopRefresh(); })
-      .catch((err) => console.error('POP upload failed:', err));
+    if (uploadProgress) return;
+    setUploadProgress({ pct: 0, name: file.name });
+    uploadPopFile(file, dest, (pct) => setUploadProgress({ pct, name: file.name }))
+      .then(() => { setUploadProgress(null); handleRefresh(); })
+      .catch((err) => { console.error('POP upload failed:', err); setUploadProgress(null); });
+  }
+
+  function handleCreateFAQFolder(path) {
+    createFolder(path)
+      .then(handleRefresh)
+      .catch((err) => console.error('Create folder failed:', err));
   }
 
   function handleCreatePopFolder(path) {
     createPopFolder(path)
-      .then(() => { if (onPopRefresh) onPopRefresh(); })
+      .then(handleRefresh)
       .catch((err) => console.error('Create folder failed:', err));
   }
+
+  const isUploading = !!uploadProgress;
 
   const sharedProps = {
     onDeleted: handleRefresh,
@@ -85,10 +94,11 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
     selectedPaths,
     onToggleSelect: handleToggleSelect,
     refreshKey,
+    isUploading,
   };
 
   const popSharedProps = {
-    onDeleted: onPopRefresh || handleRefresh,
+    onDeleted: handleRefresh,
     pickMode: null,
     onPick: () => {},
     selectMode: false,
@@ -96,6 +106,10 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
     onToggleSelect: () => {},
     refreshKey,
     downloadUrlFn: popDownloadUrl,
+    isUploading,
+    deleteFileFn: deletePopFile,
+    deleteFolderFn: (path) => deletePopFolder(`Data/${path}`),
+    noRename: true,
   };
 
   return (
@@ -111,6 +125,21 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
           >
             <X size={12} />
           </button>
+        </div>
+      )}
+
+      {uploadProgress && (
+        <div className="px-3 py-2 border-b border-border bg-muted/60">
+          <div className="flex items-center justify-between mb-1 gap-2">
+            <span className="text-xs text-foreground/70 truncate min-w-0">{uploadProgress.name}</span>
+            <span className="text-xs text-muted-foreground flex-shrink-0">{uploadProgress.pct}%</span>
+          </div>
+          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+            <div
+              className="h-full bg-primary rounded-full transition-all duration-150"
+              style={{ width: `${uploadProgress.pct}%` }}
+            />
+          </div>
         </div>
       )}
 
@@ -156,6 +185,8 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
         files={fileTree.all_csvs || []}
         showPath
         onUpload={handleUploadFAQ}
+        accept=".csv"
+        onCreateFolder={handleCreateFAQFolder}
         {...sharedProps}
       />
       <FileGroup
@@ -163,14 +194,14 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
         files={fileTree.crop_qa_files || []}
         groupBy="state"
         basePath="outputs/repair"
-        onUpload={handleUploadFAQ}
+        onCreateFolder={handleCreateFAQFolder}
         {...sharedProps}
       />
       <FileGroup
         label="Final CSVs"
         files={fileTree.final_csvs || []}
         groupBy="state"
-        onUpload={handleUploadFAQ}
+        onCreateFolder={handleCreateFAQFolder}
         {...sharedProps}
       />
       <FileGroup
@@ -178,6 +209,7 @@ export default function FilesPanel({ fileTree, onRefresh, pickMode, setPickMode,
         files={popDataFiles || []}
         showPath
         onUpload={handleUploadPOP}
+        accept=".pdf"
         onCreateFolder={handleCreatePopFolder}
         {...popSharedProps}
       />
