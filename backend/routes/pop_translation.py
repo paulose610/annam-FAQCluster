@@ -325,6 +325,65 @@ def _run_pop_sync(req: PopRequest) -> None:
     print(f"\n[POP] All documents processed for {req.state}/{req.crop}", flush=True)
 
 
+@router.get("/pop/state-table")
+def get_pop_state_table():
+    """
+    Return flat table of POP docs.
+
+    Scans POP_Work/Data/{state}/{crop}/ for PDF files.
+    For each PDF, checks for a matching processed folder {doc_stem}/final_output/*.docx.
+    Paths are relative to POP_Work/ (use /pop/download/{path} to fetch them).
+    """
+    data_dir = POP_WORK_DIR / "Data"
+    rows = []
+    if not data_dir.exists():
+        return {"rows": rows}
+    for state_dir in sorted(data_dir.iterdir()):
+        if not state_dir.is_dir() or state_dir.name.startswith('.'):
+            continue
+        crop_dirs = [d for d in sorted(state_dir.iterdir()) if d.is_dir() and not d.name.startswith('.')]
+        if not crop_dirs:
+            # Entirely empty state folder — no crop subdirs
+            rows.append({
+                "state": state_dir.name,
+                "crop": None,
+                "doc_name": None,
+                "doc_path": None,
+                "output_path": None,
+                "is_empty": True,
+            })
+            continue
+        for crop_dir in crop_dirs:
+            pdfs = sorted(crop_dir.glob("*.pdf"))
+            if not pdfs:
+                rows.append({
+                    "state": state_dir.name,
+                    "crop": crop_dir.name,
+                    "doc_name": None,
+                    "doc_path": None,
+                    "output_path": None,
+                    "is_empty": True,
+                })
+            else:
+                for pdf in pdfs:
+                    doc_stem = pdf.stem
+                    output_path = None
+                    final_dir = crop_dir / doc_stem / "final_output"
+                    if final_dir.is_dir():
+                        docx_list = sorted(final_dir.glob("*.docx"))
+                        if docx_list:
+                            output_path = str(docx_list[0].relative_to(POP_WORK_DIR))
+                    rows.append({
+                        "state": state_dir.name,
+                        "crop": crop_dir.name,
+                        "doc_name": pdf.name,
+                        "doc_path": str(pdf.relative_to(POP_WORK_DIR)),
+                        "output_path": output_path,
+                        "is_empty": False,
+                    })
+    return {"rows": rows}
+
+
 @router.post("/run/pop")
 def run_pop(req: PopRequest, background: BackgroundTasks):
     _safe_name(req.state)

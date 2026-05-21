@@ -25,7 +25,7 @@ Usage:
   python analysis/cluster_repair.py \\
       --raw-file data/raw/punjab_maize_raw.csv \\
       --crop "Maize Makka" \\
-      --model /home/kshitij/models/qwen2.5-7b-instruct \\
+      --model /home/paulose/models/qwen2.5-7b-instruct \\
       --gpu-id 0 \\
       --mode full
 """
@@ -48,7 +48,7 @@ from hyperparameter_tuning import (                        # noqa: F401
     run_clustering, phase1_fast_screening,
     generate_param_grid, load_stopwords
 )
-from llm_evaluator_hf import LocalHFJudge, evaluate_config_with_hf  # noqa: F401
+from llm_evaluator_hf import LocalHFJudge, evaluate_config_with_hf, _JSON_SYSTEM_PROMPT  # noqa: F401
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -149,20 +149,8 @@ def _safe_int(x):
 class RepairJudge(LocalHFJudge):
 
     def _gen_long(self, user_text: str, max_new_tokens: int = 300) -> str:
-        """Generate a longer response (for JSON outputs)."""
-        import torch
-        prompt = self._build_prompt(user_text)
-        enc = self.tokenizer(prompt, return_tensors="pt",
-                             truncation=True, max_length=4096).to(self.device)
-        enc.pop("token_type_ids", None)
-        with torch.no_grad():
-            out = self.model.generate(
-                **enc, max_new_tokens=max_new_tokens,
-                do_sample=False, temperature=1.0,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        new = out[0, enc["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new, skip_special_tokens=True).strip()
+        """Generate a longer response (for JSON outputs) via the remote API."""
+        return self._call_api(user_text, max_tokens=max_new_tokens, system_prompt=_JSON_SYSTEM_PROMPT)
 
     @staticmethod
     def _parse_json_list(raw: str) -> list:
@@ -438,7 +426,7 @@ def step_c_split(clusters: dict, diverse_reps: dict, result_df: pd.DataFrame,
 
 
 def step_d_merge(clusters: dict, st_model, judge: RepairJudge,
-                 crop: str, sim_thresh: float = 0.82, max_pairs: int = 100) -> tuple:
+                 crop: str, sim_thresh: float = 0.75, max_pairs: int = 100) -> tuple:
     """
     Find candidate merge pairs via cosine similarity of cluster representatives,
     then LLM-confirm each pair. Absorbs smaller cluster into larger.
@@ -722,7 +710,7 @@ def main():
                     help='Input raw CSV. Required for modes: phase1, full.')
     ap.add_argument('--crop', default='Maize Makka',
                     help='Crop name as it appears in the raw CSV Crop column.')
-    ap.add_argument('--model', default='/home/kshitij/models/qwen2.5-7b-instruct')
+    ap.add_argument('--model', default='google/gemma-4-26B-A4B-it')
     ap.add_argument('--gpu-id', type=int, default=0)
     ap.add_argument('--batch-size', type=int, default=8)
 
@@ -752,7 +740,7 @@ def main():
     ap.add_argument('--coherence-flag', default='C',
                     choices=['B', 'C'],
                     help='LLM coherence rating that triggers a split (C=strict, B=aggressive).')
-    ap.add_argument('--merge-sim', type=float, default=0.82,
+    ap.add_argument('--merge-sim', type=float, default=0.75,
                     help='Cosine similarity threshold for merge candidate pairs.')
 
     args = ap.parse_args()

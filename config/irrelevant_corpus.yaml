@@ -143,6 +143,26 @@ categories:
       - compensaton
       - goverment
       - ministery
+  system_logs:
+    description: "Call-center system/admin logs that are not farmer queries"
+    keywords:
+      - sms activation
+      - remote disc
+      - call disconnected
+      - remote disconnected
+      - line disconnected
+      - network disconnected
+      - blank call
+      - silent call
+      - no query
+      - no question
+      - nothing asked
+    typos:
+      - sms activtion
+      - sms activ
+      - remote dis
+      - remot disc
+
   irrelevant:
     description: "General irrelevant or spam queries"
     keywords:

@@ -5,6 +5,8 @@ Tracks the current subprocess per job thread so the stop endpoint can kill it.
 Import from both app.py (for cancel/cleanup) and pipeline files (for register_proc).
 """
 
+import os
+import signal
 import threading
 import subprocess
 from typing import Optional
@@ -58,7 +60,12 @@ def cancel(job_id: str) -> None:
         ev.set()
     proc = _active_procs.pop(job_id, None)
     if proc and proc.poll() is None:
-        proc.kill()
+        try:
+            # Kill the entire process group so child processes (e.g. unique_question_finder)
+            # are also terminated when the parent subprocess is stopped.
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            proc.kill()
 
 
 def make_event(job_id: str) -> threading.Event:

@@ -1,6 +1,11 @@
 import argparse
+import json
 import os
+import re
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import List, Optional
@@ -12,6 +17,13 @@ from backend.common import APP_DATA, _resolve_safe
 from backend.jobs import _submit
 
 router = APIRouter()
+
+_ROOT_DIR = Path(__file__).resolve().parent.parent.parent  # FAQCluster/
+_RUN_PIPELINE = _ROOT_DIR / 'run_pipeline.py'
+
+
+def slug(name: str) -> str:
+    return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
 
 
 # --- Pydantic models ---
@@ -41,7 +53,7 @@ class PipelineRequest(BaseModel):
     crops: Optional[List[str]] = None
     domains: Optional[List[str]] = None
     output_dir: str = "outputs/repair"
-    model: str = "../models/qwen2.5-7b-instruct"
+    model: str = "google/gemma-4-26B-A4B-it"
     api_key: Optional[str] = None
     gpu_id: int = 1
     batch_size: int = 8
@@ -79,7 +91,7 @@ class FullRequest(BaseModel):
     domains: Optional[List[str]] = None
     output_dir: str = "outputs/repair"
     pre_output: Optional[str] = None
-    model: str = "../models/qwen2.5-7b-instruct"
+    model: str = "google/gemma-4-26B-A4B-it"
     api_key: Optional[str] = None
     gpu_id: int = 1
     batch_size: int = 8
@@ -94,6 +106,18 @@ class FullRequest(BaseModel):
         if v is not None:
             _resolve_safe(v)
         return v
+
+
+def _next_versioned_path(current_path: Path) -> Path:
+    """Return the next non-existent versioned path, e.g. maharashtra_1.csv → maharashtra_2.csv."""
+    m = re.match(r'^(.+)_(\d+)$', current_path.stem)
+    base, ver = (m.group(1), int(m.group(2))) if m else (current_path.stem, 0)
+    next_ver = ver + 1
+    while True:
+        candidate = current_path.parent / f"{base}_{next_ver}{current_path.suffix}"
+        if not candidate.exists():
+            return candidate
+        next_ver += 1
 
 
 # --- Sync pipeline wrappers ---
@@ -122,12 +146,6 @@ def _run_pre_sync(r: PreRequest) -> None:
 
 def _run_pipeline_sync(r: PipelineRequest) -> None:
     import _job_ctl
-    from run_pipeline import (
-        run_phase1, run_phase2, run_repair,
-        run_unique_questions, run_dedup, run_corpus_filter, run_qa_gen,
-        load_candidates, load_best_cfg, slug,
-        DEFAULT_CORPUS,
-    )
     import pandas as pd
 
     resolved_raw = str(APP_DATA / r.input)
@@ -151,60 +169,56 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
 
     for crop in crops:
         _job_ctl.check_cancel()
-        args = argparse.Namespace(
-            raw_file           = resolved_raw,
-            crop               = crop,
-            model              = r.model,
-            api_key            = r.api_key,
-            gpu_id             = r.gpu_id,
-            batch_size         = r.batch_size,
-            grid_mode          = r.grid_mode,
-            skip_phase1        = r.skip_phase1,
-            skip_phase2        = r.skip_phase2,
-            skip_repair        = r.skip_repair,
-            skip_unique_q      = r.skip_unique_q,
-            skip_corpus_filter = r.skip_corpus_filter,
-            skip_qa_gen        = r.skip_qa_gen,
-            max_queries        = 20000,
-            phase2_top_k       = 5,
-            coverage_cap       = 0.80,
-            diverse_k          = 3,
-            coherence_flag     = 'C',
-            merge_sim          = 0.82,
-            corpus_file        = str(DEFAULT_CORPUS),
-            fuzz_threshold     = 100,
-            output_dir         = str(out_base),
+        (out_base / slug(crop)).mkdir(parents=True, exist_ok=True)
+
+        # Run the full per-crop pipeline as a subprocess so that:
+        # (1) stop button immediately kills it via os.killpg on the process group, and
+        # (2) the auto-skip logic in run_pipeline.py:main() skips already-done stages.
+        cmd = [
+            sys.executable, '-u', str(_RUN_PIPELINE),
+            '--raw-file',   resolved_raw,
+            '--crop',       crop,
+            '--model',      r.model,
+            '--gpu-id',     str(r.gpu_id),
+            '--batch-size', str(r.batch_size),
+            '--grid-mode',  r.grid_mode,
+            '--output-dir', str(_resolve_safe(r.output_dir)),
+        ]
+        if r.api_key:
+            cmd += ['--api-key', r.api_key]
+        if r.skip_phase1:        cmd += ['--skip-phase1']
+        if r.skip_phase2:        cmd += ['--skip-phase2']
+        if r.skip_repair:        cmd += ['--skip-repair']
+        if r.skip_unique_q:      cmd += ['--skip-unique-q']
+        if r.skip_corpus_filter: cmd += ['--skip-corpus-filter']
+        if r.skip_qa_gen:        cmd += ['--skip-qa-gen']
+
+        print(f"[INFO] Starting pipeline for '{crop}'...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, preexec_fn=os.setsid, bufsize=1,
         )
+        _job_ctl.register_proc(proc)
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            # Race-condition fix: cancel() may have fired before register_proc();
+            # kill the proc here if it's still running.
+            if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
+                if proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                break
+        proc.wait()
+        _job_ctl.deregister_proc()
 
-        out_dir = out_base / slug(crop)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Unconditional check: raises JobCancelled whether subprocess was killed (-9)
+        # or completed with returncode=0 just as the user clicked Stop.
+        _job_ctl.check_cancel()
 
-        try:
-            candidates = load_candidates(out_dir) if args.skip_phase1 else run_phase1(args, out_dir)
-            _job_ctl.check_cancel()
-            best_cfg   = load_best_cfg(out_dir, candidates) if args.skip_phase2 else run_phase2(args, out_dir, candidates)
-            _job_ctl.check_cancel()
-
-            if not args.skip_repair:
-                run_repair(args, out_dir, candidates, best_cfg)
-            _job_ctl.check_cancel()
-            if not args.skip_unique_q:
-                run_unique_questions(args, out_dir)
-
-            run_dedup(out_dir)
-            _job_ctl.check_cancel()
-
-            if not args.skip_corpus_filter:
-                corpus_path = Path(args.corpus_file)
-                if corpus_path.exists():
-                    run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
-            _job_ctl.check_cancel()
-
-            if not args.skip_qa_gen:
-                run_qa_gen(args, out_dir)
-
-        except Exception as exc:
-            print(f"[WARN] Crop '{crop}' failed: {exc}")
+        if proc.returncode != 0:
+            print(f"[WARN] Crop '{crop}' failed (returncode={proc.returncode})")
             failed.append(crop)
 
     if failed:
@@ -226,12 +240,6 @@ def _run_full_sync(r: FullRequest) -> None:
     import _job_ctl
     import pandas as pd
     from run_pre_pipeline import run_state_filter, run_crop_normalizer
-    from run_pipeline import (
-        run_phase1, run_phase2, run_repair,
-        run_unique_questions, run_dedup, run_corpus_filter, run_qa_gen,
-        load_candidates, load_best_cfg, slug,
-        DEFAULT_CORPUS,
-    )
     from run_post_pipeline import run_dedup as post_run_dedup
 
     if r.crops:
@@ -259,88 +267,200 @@ def _run_full_sync(r: FullRequest) -> None:
         raw_file = APP_DATA / "cleaned_data.csv"
         if r.pre_output:
             norm_file = _resolve_safe(r.pre_output)
+            norm_file.parent.mkdir(parents=True, exist_ok=True)
             _norm_is_temp = False
+
+            # meta.json lives in the folder — matches what getNextState looks for
+            meta_path = norm_file.parent / "meta.json"
+            existing_meta: dict = {}
+            for _mp in (meta_path, norm_file.with_suffix('.json')):
+                if _mp.exists():
+                    try:
+                        existing_meta = json.loads(_mp.read_text())
+                        break
+                    except Exception:
+                        pass
+
+            existing_domains     = set(existing_meta.get("domains", []))
+            existing_crops_meta  = set(existing_meta.get("crops", []))
+            requested_domains    = set(r.domains or [])
+            file_exists          = norm_file.exists() and bool(existing_meta)
+            same_state           = existing_meta.get("state") == r.state if existing_meta else False
+            same_domains         = existing_domains == requested_domains
+
+            if file_exists and same_state and same_domains:
+                # --- Case 1/2: same state + domains — reuse or append new crops ---
+                if crops is None:
+                    print(f"[INFO] Reusing existing pre-pipeline output: {norm_file}")
+                    crops = pd.read_csv(norm_file)["Crop"].dropna().str.strip().unique().tolist()
+                    print(f"[INFO] {len(crops)} crop(s) from cached pre-pipeline output")
+                else:
+                    missing_crops = [c for c in crops if c not in existing_crops_meta]
+                    if not missing_crops:
+                        # Case 1: all requested crops already present
+                        print(f"[INFO] Reusing existing pre-pipeline output: {norm_file}")
+                    else:
+                        # Case 2: run pre-pipeline only for new crops and append
+                        print(f"[INFO] {len(crops) - len(missing_crops)} crop(s) reused; "
+                              f"running pre-pipeline for {len(missing_crops)} new crop(s): {', '.join(missing_crops)}")
+                        intermediate = norm_file.parent / f"{norm_file.stem}_state_rows.csv"
+                        run_state_filter(raw_file, r.state, intermediate, domains=r.domains or [])
+                        fd2, tmp2 = tempfile.mkstemp(suffix='_extra.csv', dir=str(norm_file.parent))
+                        os.close(fd2)
+                        tmp2_path = Path(tmp2)
+                        try:
+                            run_crop_normalizer(intermediate, tmp2_path, missing_crops)
+                            _df_extra = pd.read_csv(tmp2_path, low_memory=False)
+                            if 'domain' not in _df_extra.columns and 'QueryType' in _df_extra.columns:
+                                _df_extra.insert(12, 'domain', _df_extra['QueryType'])
+                            _df_existing = pd.read_csv(norm_file, low_memory=False)
+                            pd.concat([_df_existing, _df_extra], ignore_index=True).to_csv(norm_file, index=False)
+                            print(f"[INFO] Appended {len(missing_crops)} new crop(s) to {norm_file}")
+                        finally:
+                            if tmp2_path.exists():
+                                tmp2_path.unlink()
+                        if intermediate.exists():
+                            intermediate.unlink()
+                        meta_path.write_text(json.dumps({
+                            "state": r.state,
+                            "domains": r.domains or [],
+                            "crops": sorted(existing_crops_meta | set(missing_crops)),
+                        }))
+            else:
+                # --- Case 3: domain/state changed — version up and run fresh ---
+                if file_exists:
+                    norm_file = _next_versioned_path(norm_file)
+                    norm_file.parent.mkdir(parents=True, exist_ok=True)
+                    meta_path = norm_file.with_suffix('.json')
+                    print(f"[INFO] Domain/state change — new pre-pipeline output: {norm_file}")
+
+                intermediate = norm_file.parent / f"{norm_file.stem}_state_rows.csv"
+                run_state_filter(raw_file, r.state, intermediate, domains=r.domains or [])
+                if crops is None:
+                    run_crop_normalizer(intermediate, norm_file)
+                    crops = pd.read_csv(norm_file)["Crop"].dropna().str.strip().unique().tolist()
+                    print(f"[INFO] Auto-discovered {len(crops)} canonical crop(s) after normalization")
+                else:
+                    run_crop_normalizer(intermediate, norm_file, crops)
+                if intermediate.exists():
+                    intermediate.unlink()
+                meta_path.write_text(json.dumps({
+                    "state": r.state,
+                    "domains": r.domains or [],
+                    "crops": sorted(crops) if crops else [],
+                }))
+                _df_norm = pd.read_csv(norm_file, low_memory=False)
+                if 'domain' not in _df_norm.columns and 'QueryType' in _df_norm.columns:
+                    _df_norm.insert(12, 'domain', _df_norm['QueryType'])
+                    _df_norm.to_csv(norm_file, index=False)
         else:
             fd, tmp_path = tempfile.mkstemp(suffix='_norm.csv', dir=str(APP_DATA))
             os.close(fd)
             norm_file = Path(tmp_path)
             _norm_is_temp = True
             print("[INFO] No pre-pipeline output path provided — result kept in RAM only (temp file deleted after use)")
-        intermediate = norm_file.parent / f"{norm_file.stem}_state_rows.csv"
-
-        run_state_filter(raw_file, r.state, intermediate, domains=r.domains or [])
-
-        if crops is None:
-            run_crop_normalizer(intermediate, norm_file)
-            crops = pd.read_csv(norm_file)["Crop"].dropna().str.strip().unique().tolist()
-            print(f"[INFO] Auto-discovered {len(crops)} canonical crop(s) after normalization")
-        else:
-            run_crop_normalizer(intermediate, norm_file, crops)
-
-        if intermediate.exists():
-            intermediate.unlink()
+            intermediate = norm_file.parent / f"{norm_file.stem}_state_rows.csv"
+            run_state_filter(raw_file, r.state, intermediate, domains=r.domains or [])
+            if crops is None:
+                run_crop_normalizer(intermediate, norm_file)
+                crops = pd.read_csv(norm_file)["Crop"].dropna().str.strip().unique().tolist()
+                print(f"[INFO] Auto-discovered {len(crops)} canonical crop(s) after normalization")
+            else:
+                run_crop_normalizer(intermediate, norm_file, crops)
+            if intermediate.exists():
+                intermediate.unlink()
+            _df_norm = pd.read_csv(norm_file, low_memory=False)
+            if 'domain' not in _df_norm.columns and 'QueryType' in _df_norm.columns:
+                _df_norm.insert(12, 'domain', _df_norm['QueryType'])
+                _df_norm.to_csv(norm_file, index=False)
 
         effective_raw = str(norm_file)
 
     state_folder = Path(effective_raw).stem
     out_base     = _resolve_safe(r.output_dir) / state_folder
+
+    # Skip crops whose full pipeline output already exists
+    def _output_done(crop_slug: str) -> bool:
+        d = out_base / crop_slug
+        return (d / f"{out_base.name}_{crop_slug}.csv").exists() or (d / "dedup_faq.csv").exists()
+
+    crops_to_run = [c for c in crops if not _output_done(slug(c))]
+    skipped_crops = [c for c in crops if _output_done(slug(c))]
+    if skipped_crops:
+        print(f"[INFO] Skipping {len(skipped_crops)} already-completed crop(s): {', '.join(skipped_crops)}")
+    print(f"[INFO] Found {len(crops_to_run)} unique crop(s): {', '.join(crops_to_run)}")
+
     failed = []
-    for crop in crops:
+    for crop in crops_to_run:
         _job_ctl.check_cancel()
-        args = argparse.Namespace(
-            raw_file           = effective_raw,
-            crop               = crop,
-            model              = r.model,
-            api_key            = r.api_key,
-            gpu_id             = r.gpu_id,
-            batch_size         = r.batch_size,
-            grid_mode          = r.grid_mode,
-            skip_phase1        = False,
-            skip_phase2        = False,
-            skip_repair        = False,
-            skip_unique_q      = False,
-            skip_corpus_filter = False,
-            skip_qa_gen        = r.skip_qa_gen,
-            max_queries        = 20000,
-            phase2_top_k       = 5,
-            coverage_cap       = 0.80,
-            diverse_k          = 3,
-            coherence_flag     = 'C',
-            merge_sim          = 0.82,
-            corpus_file        = str(DEFAULT_CORPUS),
-            fuzz_threshold     = 100,
-            output_dir         = str(out_base),
+        (out_base / slug(crop)).mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            sys.executable, '-u', str(_RUN_PIPELINE),
+            '--raw-file',   effective_raw,
+            '--crop',       crop,
+            '--model',      r.model,
+            '--gpu-id',     str(r.gpu_id),
+            '--batch-size', str(r.batch_size),
+            '--grid-mode',  r.grid_mode,
+            '--output-dir', str(_resolve_safe(r.output_dir)),
+        ]
+        if r.api_key:
+            cmd += ['--api-key', r.api_key]
+        if r.skip_qa_gen:
+            cmd += ['--skip-qa-gen']
+
+        print(f"[INFO] Starting pipeline for '{crop}'...")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, preexec_fn=os.setsid, bufsize=1,
         )
+        _job_ctl.register_proc(proc)
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            # Race-condition fix: cancel() may have fired before register_proc();
+            # kill the proc here if it's still running.
+            if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
+                if proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                    except Exception:
+                        proc.kill()
+                break
+        proc.wait()
+        _job_ctl.deregister_proc()
 
-        out_dir = out_base / slug(crop)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Unconditional check: raises JobCancelled whether subprocess was killed (-9)
+        # or completed with returncode=0 just as the user clicked Stop.
+        # This also prevents post_run_dedup from running after a stop.
+        _job_ctl.check_cancel()
 
-        try:
-            candidates = run_phase1(args, out_dir)
-            _job_ctl.check_cancel()
-            best_cfg   = run_phase2(args, out_dir, candidates)
-            _job_ctl.check_cancel()
-            run_repair(args, out_dir, candidates, best_cfg)
-            _job_ctl.check_cancel()
-            run_unique_questions(args, out_dir)
-            run_dedup(out_dir)
-            _job_ctl.check_cancel()
-            corpus_path = Path(args.corpus_file)
-            if corpus_path.exists():
-                run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
-            _job_ctl.check_cancel()
-            if not args.skip_qa_gen:
-                run_qa_gen(args, out_dir)
-        except Exception as exc:
-            print(f"[WARN] Crop '{crop}' failed: {exc}")
+        if proc.returncode != 0:
+            print(f"[WARN] Crop '{crop}' failed (returncode={proc.returncode})")
             failed.append(crop)
+        elif not r.skip_post_pipeline:
+            try:
+                post_run_dedup(out_base, [crop])
+            except Exception as exc:
+                print(f"[WARN] Post-pipeline for '{crop}' failed: {exc}")
 
     if not r.skip_pre_pipeline and _norm_is_temp and norm_file.exists():
         norm_file.unlink()
         print("[INFO] Temporary pre-pipeline file removed from disk")
 
-    if not r.skip_post_pipeline:
-        post_run_dedup(out_base, crops)
+    # Update meta with cumulative completed crops
+    if r.pre_output and not r.skip_pre_pipeline:
+        try:
+            cur_meta: dict = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        except Exception:
+            cur_meta = {}
+        newly_done = [c for c in crops_to_run if c not in failed]
+        all_crops = sorted(set(cur_meta.get("crops", [])) | set(newly_done))
+        meta_path.write_text(json.dumps({
+            "state": r.state,
+            "domains": r.domains or [],
+            "crops": all_crops,
+        }))
 
     if failed:
         raise RuntimeError(f"The following crops failed: {', '.join(failed)}")

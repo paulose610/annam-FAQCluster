@@ -26,6 +26,10 @@ export function downloadUrl(path) {
   return `/files/download/${path}`;
 }
 
+export function outputDownloadUrl(state, crop) {
+  return `/app/output/${encodeURIComponent(state)}/${encodeURIComponent(crop)}`;
+}
+
 export async function deleteFile(path) {
   const res = await fetch(`/files/${path}`, { method: 'DELETE' });
   return _handleResponse(res);
@@ -155,6 +159,32 @@ export async function runFull(body) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
+  return _handleResponse(res);
+}
+
+export async function getNextState(state = '', domains = []) {
+  const params = new URLSearchParams({ state });
+  for (const d of domains) params.append('domains', d);
+  const res = await fetch(`/app/next-state?${params}`);
+  return _handleResponse(res);
+}
+
+export async function getStateTable() {
+  const res = await fetch('/app/state-table');
+  return _handleResponse(res);
+}
+
+export async function getPopStateTable() {
+  const res = await fetch('/pop/state-table');
+  return _handleResponse(res);
+}
+
+export async function uploadAuditedFile(file, state, crop) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('state', state);
+  fd.append('crop', crop);
+  const res = await fetch('/files/upload-audited', { method: 'POST', body: fd });
   return _handleResponse(res);
 }
 

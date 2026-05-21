@@ -1,5 +1,7 @@
+import { useState, useRef, useEffect } from 'react';
 import RunTile from './RunTile.jsx';
-import { runPre, runPipeline, runPost, runFull } from '../../api.js';
+import StateTable from './StateTable.jsx';
+import { runFull } from '../../api.js';
 
 export const STATE_NAMES = [
   'A And N Islands', 'Andhra Pradesh', 'Arunachal Pradesh', 'Assam',
@@ -122,97 +124,47 @@ export const CROP_NAMES = [
   'White Clover', 'White Yam', 'Winged Bean', 'Yard Long Bean', 'Zantedeschia',
 ].filter((v, i, a) => a.indexOf(v) === i).sort();
 
-const GRID_MODE_OPTIONS = [
-  { value: 'quick',      label: 'Quick (18 configs)' },
-  { value: 'medium',     label: 'Medium (108 configs)' },
-  { value: 'full',       label: 'Full (240 configs)' },
-  { value: 'exhaustive', label: 'Exhaustive (480 configs)' },
-];
-
-const PRE_FIELDS = [
-  { key: 'state',            label: 'State',            type: 'states-selector' },
-  { key: 'crops',            label: 'Crops',            type: 'crops-selector' },
-  { key: 'domains',          label: 'Domains',          type: 'domains-selector' },
-  { key: 'output',           label: 'Output path',      type: 'text' },
-  { key: 'keep_intermediate',label: 'Keep intermediate',type: 'checkbox', defaultValue: true },
-];
-
-const PIPELINE_FIELDS = [
-  { key: 'input',     label: 'Input CSV',type: 'csv-from-sidebar' },
-  { key: 'crops',     label: 'Crops',    type: 'crops-selector',   hint: '* If none selected, all crops present in the selected file will be processed.' },
-  { key: 'domains',   label: 'Domains',  type: 'domains-selector', hint: '* If none selected, all domains present in the selected file will be processed.' },
-  {
-    key: 'grid_mode', label: 'Grid mode', type: 'select',
-    defaultValue: 'quick', options: GRID_MODE_OPTIONS,
-  },
-  { key: 'skip_phase1',       label: 'Skip phase 1',       type: 'checkbox' },
-  { key: 'skip_phase2',       label: 'Skip phase 2',       type: 'checkbox' },
-  { key: 'skip_repair',       label: 'Skip repair',        type: 'checkbox' },
-  { key: 'skip_unique_q',     label: 'Skip unique-Q',      type: 'checkbox' },
-  { key: 'skip_corpus_filter',label: 'Skip corpus filter', type: 'checkbox' },
-  { key: 'skip_qa_gen',       label: 'Skip QA gen',        type: 'checkbox' },
-];
-
-const POST_FIELDS = [
-  { key: 'input', label: 'Crop QA folder', type: 'repair-dir-dropdown' },
-  { key: 'crops', label: 'Crops',          type: 'crops-selector', hint: '* If none selected, all crops present in the selected folder will be processed.' },
-];
-
 const FULL_FIELDS = [
-  { key: 'state',      label: 'State',                   type: 'states-selector' },
-  { key: 'crops',      label: 'Crops',                   type: 'crops-selector' },
-  { key: 'domains',    label: 'Domains',                 type: 'domains-selector' },
-  { key: 'pre_output', label: 'Pre-pipeline output path', type: 'text', defaultValue: '', hint: 'If left empty, no intermediate file will be saved to disk.' },
-  {
-    key: 'grid_mode', label: 'Grid mode', type: 'select',
-    defaultValue: 'quick', options: GRID_MODE_OPTIONS,
-  },
-  { key: 'skip_pre_pipeline',  label: 'Skip pre-pipeline',  type: 'checkbox' },
-  { key: 'skip_qa_gen',        label: 'Skip QA gen',        type: 'checkbox' },
-  { key: 'skip_post_pipeline', label: 'Skip post-pipeline', type: 'checkbox' },
+  { key: 'state',       label: 'State',   type: 'states-selector' },
+  { key: 'crops',       label: 'Crops',   type: 'crops-selector' },
+  { key: 'domains',     label: 'Domains', type: 'domains-selector' },
+  { key: 'skip_qa_gen', label: 'Skip QA gen', type: 'checkbox' },
 ];
 
-export default function FunctionsPanel({ repairDirs, onRequestPick }) {
+export default function FunctionsPanel() {
+  const [tableRefreshKey, setTableRefreshKey] = useState(0);
+  const formRef = useRef(null);
+  const [stacked, setStacked] = useState(false);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => setStacked(!entry.isIntersecting),
+      { threshold: 0 }
+    );
+    if (formRef.current) observer.observe(formRef.current);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="grid grid-cols-2 gap-4 max-[700px]:grid-cols-1">
-      <RunTile
-        title="Pre-Pipeline"
-        description="Filter state rows and normalise crop names"
-        fields={PRE_FIELDS}
-        onRun={runPre}
-        repairDirs={repairDirs}
-        cropNames={CROP_NAMES}
-        domainNames={DOMAIN_NAMES}
-        stateNames={STATE_NAMES}
-      />
-      <RunTile
-        title="Pipeline"
-        description="Run the 7-stage clustering pipeline per crop"
-        fields={PIPELINE_FIELDS}
-        onRun={runPipeline}
-        repairDirs={repairDirs}
-        cropNames={CROP_NAMES}
-        domainNames={DOMAIN_NAMES}
-        onRequestPick={onRequestPick}
-      />
-      <RunTile
-        title="Post-Pipeline"
-        description="Collect and deduplicate final outputs"
-        fields={POST_FIELDS}
-        onRun={runPost}
-        repairDirs={repairDirs}
-        cropNames={CROP_NAMES}
-      />
-      <RunTile
-        title="Full Pipeline"
-        description="Pre → pipeline → post in one shot"
-        fields={FULL_FIELDS}
-        onRun={runFull}
-        repairDirs={repairDirs}
-        cropNames={CROP_NAMES}
-        domainNames={DOMAIN_NAMES}
-        stateNames={STATE_NAMES}
-      />
+    <div className="flex flex-col">
+      <div ref={formRef} className="max-w-3xl mx-auto w-full">
+        <RunTile
+          title="Full Pipeline"
+          description="Pre-pipeline → clustering → post-pipeline in one shot"
+          fields={FULL_FIELDS}
+          onRun={runFull}
+          cropNames={CROP_NAMES}
+          domainNames={DOMAIN_NAMES}
+          stateNames={STATE_NAMES}
+          onJobDone={() => setTableRefreshKey((k) => k + 1)}
+          tileKey="full-pipeline"
+        />
+      </div>
+      <div className={`sticky top-0 z-10 bg-background pt-6 h-screen ${stacked ? 'overflow-y-auto' : 'overflow-hidden'}`}>
+        <div className="max-w-[96rem] mx-auto w-full">
+          <StateTable refreshKey={tableRefreshKey} />
+        </div>
+      </div>
     </div>
   );
 }

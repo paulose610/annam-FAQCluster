@@ -12,7 +12,7 @@ Usage:
         [--skip-dedup]
 
 Output (per crop folder):
-    <input>/<crop>/dedup_faq.csv       (deduplicated FAQs)
+    <input>/<crop>/<state>_<crop>.csv   (deduplicated FAQs)
     <input>/<crop>/phase_data_faq.csv  (LLM matching phase log)
 """
 
@@ -33,7 +33,6 @@ except ImportError:
     _ctl = None
 
 SOURCE_FILE = "unique_questions_freq_qa.csv"
-DEDUP_OUT   = "dedup_faq.csv"
 PHASE_OUT   = "phase_data_faq.csv"
 
 
@@ -90,11 +89,24 @@ def run_dedup(input_dir: Path, crops: list | None = None):
             print(f"  [ERROR] {crop_dir.name}: {e}")
             continue
 
+        dedup_out_name = f"{crop_dir.parent.name}_{crop_dir.name}.csv"
         df_phase.to_csv(crop_dir / PHASE_OUT, index=False)
         df = df[df['answer_label'] != "(unclassified)"]
-        df.to_csv(crop_dir / DEDUP_OUT, index=False)
+        df.to_csv(crop_dir / dedup_out_name, index=False)
         print(f"  Saved: {crop_dir.name}/{PHASE_OUT}")
-        print(f"  Saved: {crop_dir.name}/{DEDUP_OUT}")
+        print(f"  Saved: {crop_dir.name}/{dedup_out_name}")
+
+        import json as _json
+        _meta_path = crop_dir / "meta.json"
+        _meta = {"download": False, "audit": False}
+        if _meta_path.exists():
+            try:
+                _meta = _json.loads(_meta_path.read_text())
+                _meta.setdefault("download", False)
+                _meta.setdefault("audit", False)
+            except Exception:
+                pass
+        _meta_path.write_text(_json.dumps(_meta))
 
     print(f"\n  ✓ Deduplication complete")
 

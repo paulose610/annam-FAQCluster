@@ -1,23 +1,82 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { Square } from 'lucide-react';
 import { MultiSelector, StateSelector } from './RunTile.jsx';
-import { getPopStates, getPopCrops, getPopDocs, runPop } from '../../api.js';
+import { getPopStates, getPopCrops, getPopDocs, runPop, getJob, stopJob } from '../../api.js';
+import PopStateTable from './PopStateTable.jsx';
 
 const inputClass =
   'w-full bg-input border border-border rounded-md px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-ring transition-shadow';
 
 const labelClass = 'text-xs font-medium text-foreground/70';
 
+const POP_TILE_KEY = 'tile:pop-translation';
+
 export default function PopTranslationPanel({ onJobCreated }) {
   const [state, setState] = useState('');
   const [crop, setCrop] = useState('');
   const [docs, setDocs] = useState([]);
   const [concurrency, setConcurrency] = useState(1);
-  const [running, setRunning] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [tableRefreshKey, setTableRefreshKey] = useState(0);
+
+  // Job tracking
+  const [jobId, setJobId] = useState(null);
+  const [jobData, setJobData] = useState(null);
+  const [jobLabel, setJobLabel] = useState('');
+  const pollRef = useRef(null);
 
   const [stateOptions, setStateOptions] = useState([]);
   const [cropOptions, setCropOptions] = useState([]);
   const [docOptions, setDocOptions] = useState([]);
+
+  const formRef = useRef(null);
+  const [stacked, setStacked] = useState(false);
+
+  useEffect(() => {
+    const observer = new IntersectionObserver(
+      ([entry]) => setStacked(!entry.isIntersecting),
+      { threshold: 0 }
+    );
+    if (formRef.current) observer.observe(formRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  function stopPolling() {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+  }
+  useEffect(() => () => stopPolling(), []);
+
+  function startPolling(jid) {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const data = await getJob(jid);
+        setJobData(data);
+        if (data.status === 'done' || data.status === 'failed' || data.status === 'stopped') {
+          stopPolling();
+          setTableRefreshKey((k) => k + 1);
+        }
+      } catch { /* ignore */ }
+    }, 3000);
+  }
+
+  // Restore running job from localStorage on mount
+  useEffect(() => {
+    const saved = localStorage.getItem(POP_TILE_KEY);
+    if (!saved) return;
+    try {
+      const { jobId: savedJid, label: savedLabel } = JSON.parse(saved);
+      if (!savedJid) return;
+      setJobLabel(savedLabel || '');
+      getJob(savedJid).then((data) => {
+        setJobId(savedJid);
+        setJobData(data);
+        if (data.status === 'running') startPolling(savedJid);
+        else { setTableRefreshKey((k) => k + 1); }
+      }).catch(() => localStorage.removeItem(POP_TILE_KEY));
+    } catch { localStorage.removeItem(POP_TILE_KEY); }
+  }, []);
 
   useEffect(() => {
     getPopStates()
@@ -59,21 +118,64 @@ export default function PopTranslationPanel({ onJobCreated }) {
     if (!state || !crop) return;
     const body = { state, crop, concurrency };
     if (docs.length > 0) body.docs = docs;
-    setRunning(true);
+    const label = `${state} / ${crop}`;
+    setSubmitting(true);
     try {
       const result = await runPop(body);
-      toast.success(`POP job queued — ${result.job_id.slice(0, 8)}`);
+      const jid = result.job_id;
+      setJobId(jid);
+      setJobData({ job_id: jid, status: 'running', stdout: '', stderr: '' });
+      setJobLabel(label);
+      localStorage.setItem(POP_TILE_KEY, JSON.stringify({ jobId: jid, label }));
+      toast.success(`POP job queued — ${jid.slice(0, 8)}`);
       if (onJobCreated) onJobCreated();
+      startPolling(jid);
     } catch (err) {
       toast.error(err.message || 'Failed to start POP translation');
     } finally {
-      setRunning(false);
+      setSubmitting(false);
     }
   }
 
+  async function handleStop() {
+    if (!jobId) return;
+    try { await stopJob(jobId); } catch { /* ignore */ }
+  }
+
+  const isRunning = jobData?.status === 'running';
+  const isSettled = jobData && !isRunning;
+  const STATUS_COLORS = { done: 'text-green-400', failed: 'text-destructive', stopped: 'text-amber-400' };
+
   return (
-    <div className="flex justify-center">
+    <div className="flex flex-col">
+      <div ref={formRef} className="max-w-3xl mx-auto w-full">
+      <div className="flex justify-center">
       <div className="w-full max-w-md bg-card rounded-lg border border-border shadow-sm p-5 flex flex-col gap-4">
+
+      {isRunning && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+            <span className="text-sm font-bold text-foreground">Running</span>
+            {jobLabel && <span className="text-xs bg-accent/50 border border-border rounded px-1.5 py-0.5 text-foreground">{jobLabel}</span>}
+          </div>
+          <button
+            className="flex items-center gap-1 px-2.5 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 text-xs transition-colors cursor-pointer"
+            onClick={handleStop}
+          >
+            <Square size={11} /> Stop
+          </button>
+        </div>
+      )}
+
+      {isSettled && (
+        <div className="flex items-center gap-2">
+          <span className={`text-xs font-semibold capitalize ${STATUS_COLORS[jobData.status] || 'text-muted-foreground'}`}>
+            Last run: {jobData.status}
+          </span>
+          {jobLabel && <span className="text-xs bg-accent/50 border border-border rounded px-1.5 py-0.5 text-muted-foreground">{jobLabel}</span>}
+        </div>
+      )}
         <div>
           <h2 className="text-base font-semibold text-foreground">POP Translation</h2>
           <p className="text-xs text-muted-foreground mt-0.5">
@@ -139,10 +241,17 @@ export default function PopTranslationPanel({ onJobCreated }) {
           className="mt-1 w-full py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium
             hover:bg-primary/90 active:scale-[0.98] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           onClick={handleRun}
-          disabled={!state || !crop || running}
+          disabled={!state || !crop || submitting || isRunning}
         >
-          {running ? 'Submitting…' : 'Run Translation'}
+          {submitting ? 'Submitting…' : isRunning ? 'Running…' : 'Run Translation'}
         </button>
+      </div>
+      </div>
+      </div>
+      <div className={`sticky top-0 z-10 bg-background pt-6 h-screen ${stacked ? 'overflow-y-auto' : 'overflow-hidden'}`}>
+        <div className="max-w-4xl mx-auto w-full">
+          <PopStateTable refreshKey={tableRefreshKey} />
+        </div>
       </div>
     </div>
   );

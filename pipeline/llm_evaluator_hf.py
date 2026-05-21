@@ -1,21 +1,11 @@
 #!/usr/bin/env python3
 """
-HuggingFace Transformers-based Cluster Quality Evaluation using Qwen2.5-7B-Instruct
-
-Uses standard HuggingFace transformers with a single GPU.  Qwen2.5-7B-Instruct
-has a well-behaved chat template, no thinking-mode complications, and fits
-entirely on one RTX PRO 6000 Blackwell (102 GiB), so no cross-device sharding.
-
-Scoring method: text generation (greedy, max_new_tokens=4).
-  1. Format prompt with Qwen chat template
-  2. Call model.generate() — greedy, no sampling
-  3. Decode the first generated token(s) and match to A / B / C
+Cluster Quality Evaluation using remote Gemma-4 API (OpenAI-compatible endpoint).
 
 Usage:
     python llm_evaluator_hf.py \
         --candidates phase1_candidates.csv \
         --results-pickle phase1_results.pkl \
-        --model /home/kshitij/models/qwen2.5-7b-instruct \
         --top-k 15 --batch-size 8
 """
 
@@ -25,7 +15,8 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 import pickle
-import torch
+import requests
+from concurrent.futures import ThreadPoolExecutor
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -37,118 +28,69 @@ _sys.path.insert(0, str(SCRIPT_DIR))
 from hyperparameter_tuning import ClusteringResult, ClusteringConfig  # noqa: F401
 
 
+_API_URL   = "http://100.100.108.44:8013/v1/chat/completions"
+_API_MODEL = "google/gemma-4-26B-A4B-it"
+_SYSTEM_PROMPT = (
+    "You are an agricultural question clustering expert. "
+    "Answer ONLY with the single letter shown (A, B, or C). "
+    "Do not add any explanation."
+)
+_JSON_SYSTEM_PROMPT = (
+    "You are an agricultural data processing assistant. "
+    "Respond with ONLY valid JSON — no preamble, no explanation, no markdown code blocks."
+)
+
+
 class LocalHFJudge:
     """
-    HuggingFace Transformers judge using Qwen2.5-7B-Instruct on a single GPU.
-
-    Uses greedy text generation (max_new_tokens=4).  Qwen2.5-7B-Instruct
-    reliably returns a single letter (A / B / C) when prompted correctly,
-    so we just decode the first generated token and match it.
+    Remote LLM judge using Gemma-4 via OpenAI-compatible API.
+    Replaces the previous local HuggingFace Qwen model.
     """
 
-    DEFAULT_MODEL = "/home/kshitij/models/qwen2.5-7b-instruct"
+    DEFAULT_MODEL = _API_MODEL
 
     def __init__(self, model_name: str = DEFAULT_MODEL, batch_size: int = 8, gpu_id: int = 0):
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        self.model_name  = model_name or _API_MODEL
+        self.batch_size  = batch_size
+        self.device      = f"cuda:{gpu_id}"
+        self._session    = requests.Session()
+        self._session.headers.update({"Content-Type": "application/json"})
+        print(f"Using remote LLM: {self.model_name} @ {_API_URL}")
 
-        self.gpu_id = gpu_id
-        self.device = f"cuda:{gpu_id}"
-        print(f"Loading model: {model_name}")
-        print(f"  device=cuda:{gpu_id}  dtype=bfloat16")
-
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
-        # Qwen2.5 uses <|endoftext|> as both EOS and PAD — set pad to a neutral token
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.tokenizer.padding_side = "left"  # left-pad for batch generation
-
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            dtype=torch.bfloat16,
-            device_map={"": gpu_id},   # single GPU — no cross-device sharding
-            trust_remote_code=True,
-        )
-        self.model.eval()
-
-        self.batch_size = batch_size
-
-        used  = torch.cuda.memory_allocated(gpu_id) / 1e9
-        total = torch.cuda.get_device_properties(gpu_id).total_memory / 1e9
-        print(f"  GPU {gpu_id}: {used:.1f}/{total:.1f} GiB used")
-        print("✓ Model loaded")
-
-        # Sanity check
-        print("  Running sanity check...")
         ans = self._generate_one(
             "Paris is the capital of:\nA) England\nB) France\nC) Germany\nAnswer (A/B/C):"
         )
-        print(f"  Capital of France? → '{ans}'  ({'PASS' if 'B' in ans else 'WARN: expected B'})")
+        print(f"  Sanity check → '{ans}'  ({'PASS' if 'B' in ans else 'WARN: expected B'})")
 
     # ------------------------------------------------------------------
     # Core generation
     # ------------------------------------------------------------------
 
-    def _build_prompt(self, user_text: str) -> str:
-        """Wrap user text in Qwen2.5 chat template."""
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an agricultural question clustering expert. "
-                    "Answer ONLY with the single letter shown (A, B, or C). "
-                    "Do not add any explanation."
-                ),
-            },
-            {"role": "user", "content": user_text},
-        ]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
+    def _call_api(self, user_text: str, max_tokens: int = 10,
+                  system_prompt: str = _SYSTEM_PROMPT) -> str:
+        payload = {
+            "model": self.model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user",   "content": user_text},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0,
+        }
+        resp = self._session.post(_API_URL, json=payload, timeout=120)
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"].strip()
 
     def _generate_one(self, user_text: str) -> str:
-        """Generate a single response (greedy, max 4 new tokens). Returns decoded string."""
-        prompt = self._build_prompt(user_text)
-        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-        inputs.pop("token_type_ids", None)
-        with torch.no_grad():
-            out = self.model.generate(
-                **inputs,
-                max_new_tokens=4,
-                do_sample=False,
-                temperature=1.0,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        new_tokens = out[0, inputs["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+        return self._call_api(user_text, max_tokens=10)
 
     def _generate_batch(self, user_texts: list[str]) -> list[str]:
-        """
-        Batch generation.  Left-pads inputs so all sequences align on the right.
-        Returns one decoded response string per input.
-        """
-        prompts = [self._build_prompt(t) for t in user_texts]
-        enc = self.tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=4096,   # Qwen2.5-7B supports 32K; max observed prompt ~1.6K tokens
-        ).to(self.device)
-        enc.pop("token_type_ids", None)
-        input_len = enc["input_ids"].shape[1]
-        with torch.no_grad():
-            out = self.model.generate(
-                **enc,
-                max_new_tokens=4,
-                do_sample=False,
-                temperature=1.0,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        results = []
-        for seq in out:
-            new_tokens = seq[input_len:]
-            results.append(self.tokenizer.decode(new_tokens, skip_special_tokens=True).strip())
-        return results
+        with ThreadPoolExecutor(max_workers=min(len(user_texts), 16)) as pool:
+            futures = [pool.submit(self._call_api, t, 10) for t in user_texts]
+            return [f.result() for f in futures]
+
+    def _gen_long(self, user_text: str, max_new_tokens: int = 300) -> str:
+        return self._call_api(user_text, max_tokens=max_new_tokens, system_prompt=_JSON_SYSTEM_PROMPT)
 
     @staticmethod
     def _parse_abc(raw: str, default: str = "C") -> str:
@@ -586,7 +528,7 @@ def main():
     parser.add_argument('--results-pickle', type=str, required=True,
                         help='Pickle file with ClusteringResult objects')
     parser.add_argument('--model', type=str,
-                        default='/home/kshitij/models/qwen2.5-7b-instruct',
+                        default='google/gemma-4-26B-A4B-it',
                         help='Local model path or HF model ID')
     parser.add_argument('--top-k', type=int, default=10,
                         help='Evaluate top K candidates from Phase 1 (0 = evaluate ALL unique configs)')

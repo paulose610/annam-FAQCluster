@@ -326,7 +326,7 @@ def is_viable_config(result):
     # Criteria for viability
     if metrics['n_clusters'] < 50:  # Too coarse
         return False, "Too few clusters"
-    if metrics['n_clusters'] > 1000:  # Too granular
+    if metrics['n_clusters'] > 1500:  # Too granular
         return False, "Too many clusters"
     if metrics['noise_ratio'] > 0.3:  # Too much noise
         return False, "High noise ratio"
@@ -438,7 +438,7 @@ def main():
     parser.add_argument('--n-jobs', type=int, default=-1, help='Parallel jobs (-1 = all CPUs)')
     parser.add_argument('--use-hf', action='store_true',
                        help='Phase 2: use HuggingFace transformers (no vLLM required)')
-    parser.add_argument('--model', type=str, default='/home/kshitij/models/qwen2.5-7b-instruct',
+    parser.add_argument('--model', type=str, default='google/gemma-4-26B-A4B-it',
                        help='Local model path for HF/vLLM Phase 2 evaluation')
     parser.add_argument('--top-k', type=int, default=10,
                        help='Phase 2: evaluate top K candidates from Phase 1 (0 = all unique configs)')

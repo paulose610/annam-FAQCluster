@@ -12,6 +12,16 @@ const COMPLETION_PATTERNS = [
   /✓ Q&A generation complete/,
 ];
 
+// Maps [auto-skip] line keywords to the stage index they prove is done (0-based)
+const AUTO_SKIP_STAGE = [
+  [/phase1_results\.pkl/, 0],
+  [/phase2_scores\.csv/, 1],
+  [/cluster_questions\.csv/, 2],
+  [/unique_question_mapping\.csv/, 3],
+  [/downstream output exists/, 4],
+  [/corpus_filtered_out\.csv/, 5],
+];
+
 export function parsePipelineOutput(stdout) {
   if (!stdout) return null;
   const m = stdout.match(/\[INFO\] (?:Filtered to|Found) \d+ unique crop\(s\): (.+)/);
@@ -24,6 +34,7 @@ export function parsePipelineOutput(stdout) {
       name: crop,
       stages: STAGE_LABELS.map(name => ({ name, status: 'pending' })),
       overallStatus: 'pending',
+      qaProgress: null,
     };
   });
 
@@ -31,23 +42,46 @@ export function parsePipelineOutput(stdout) {
   let currentStageIdx = -1;
 
   for (const line of stdout.split('\n')) {
+    // Set currentCrop from the pipeline banner: "  KCC FAQ Pipeline — CropName"
+    const bannerMatch = line.match(/^\s+KCC FAQ Pipeline\s*—\s*(.+)$/);
+    if (bannerMatch) {
+      const name = bannerMatch[1].trim();
+      const match = allCrops.find(c => c.toLowerCase() === name.toLowerCase());
+      if (match) {
+        currentCrop = match;
+        data[match].overallStatus = 'running';
+      }
+      continue;
+    }
+
+    // Mark auto-skipped stages as done
+    if (line.includes('[auto-skip]') && currentCrop) {
+      for (const [pattern, idx] of AUTO_SKIP_STAGE) {
+        if (pattern.test(line)) {
+          data[currentCrop].stages[idx].status = 'done';
+          break;
+        }
+      }
+    }
+
     const stageMatch = line.match(/Stage (\d+)\/7/);
     if (stageMatch) {
       currentStageIdx = parseInt(stageMatch[1]) - 1;
-      if (currentStageIdx > 0 && currentCrop && data[currentCrop].stages[currentStageIdx].status === 'pending') {
+      if (currentCrop && data[currentCrop].stages[currentStageIdx].status === 'pending') {
         data[currentCrop].stages[currentStageIdx].status = 'active';
       }
       continue;
     }
 
+    // Fallback crop detection from "  Crop   : CropName" line (Stage 1 non-skipped path)
     const cropLineMatch = line.match(/^\s+Crop\s+:\s+(.+)$/);
-    if (cropLineMatch && currentStageIdx === 0) {
+    if (cropLineMatch && !currentCrop) {
       const name = cropLineMatch[1].trim();
       const match = allCrops.find(c => c.toLowerCase() === name.toLowerCase());
       if (match) {
         currentCrop = match;
-        data[match].stages[0].status = 'active';
         data[match].overallStatus = 'running';
+        if (currentStageIdx === 0) data[match].stages[0].status = 'active';
       }
     }
 
@@ -67,6 +101,12 @@ export function parsePipelineOutput(stdout) {
         if (active) active.status = 'failed';
         data[match].overallStatus = 'skipped';
       }
+    }
+
+    // Q&A row progress: "  Progress: 10/5633 rows (44.9s)"
+    const qaMatch = line.match(/Progress:\s+(\d+)\/(\d+)\s+rows/);
+    if (qaMatch && currentCrop) {
+      data[currentCrop].qaProgress = { done: parseInt(qaMatch[1]), total: parseInt(qaMatch[2]) };
     }
   }
 
@@ -124,6 +164,8 @@ const BADGE = {
 
 function CropCard({ crop }) {
   const badge = BADGE[crop.overallStatus] || BADGE.pending;
+  const qaActive = crop.stages[6]?.status === 'active' && crop.qaProgress;
+  const qaPct = qaActive ? Math.round(crop.qaProgress.done / crop.qaProgress.total * 100) : null;
   return (
     <div className="bg-background/35 border border-border/50 rounded-md px-2.5 py-2">
       <div className="flex items-center justify-between mb-2">
@@ -133,6 +175,16 @@ function CropCard({ crop }) {
         </span>
       </div>
       <StageBar stages={crop.stages} />
+      {qaActive && (
+        <div className="mt-1.5 flex items-center gap-1.5">
+          <div className="flex-1 h-1 bg-border/30 rounded-full overflow-hidden">
+            <div className="h-full bg-blue-400 transition-all" style={{ width: `${qaPct}%` }} />
+          </div>
+          <span className="text-[10px] text-blue-400 font-medium shrink-0">
+            {crop.qaProgress.done}/{crop.qaProgress.total} ({qaPct}%)
+          </span>
+        </div>
+      )}
     </div>
   );
 }
@@ -254,33 +306,35 @@ export function PrePipelineOutput({ stdout }) {
 
 export function parsePostPipelineOutput(stdout) {
   if (!stdout) return null;
-  if (!stdout.includes('Collect Final FAQ Outputs') && !stdout.includes('LLM Deduplication')) return null;
+  if (!stdout.includes('LLM Deduplication')) return null;
 
-  const result = { stage1: 'pending', stage2: 'pending', files: [] };
+  // No separate collect step in the current pipeline — treat it as already done
+  const result = { stage1: 'done', stage2: 'pending', files: [] };
   let cur = null;
 
   for (const line of stdout.split('\n')) {
-    if (/Stage 1\/2/.test(line)) result.stage1 = 'active';
-    if (/✓ Collect complete/.test(line)) { result.stage1 = 'done'; result.stage2 = 'active'; }
-    if (/Stage 2\/2/.test(line) && result.stage1 === 'done') result.stage2 = 'active';
-
-    const pm = line.match(/Processing:\s+(.+\.csv)/);
+    if (/LLM Deduplication/.test(line) && result.stage2 === 'pending') {
+      result.stage2 = 'active';
+    }
+    // "  Processing: black_gram/unique_questions_freq_qa.csv"
+    const pm = line.match(/Processing:\s+(\S+)\//);
     if (pm) {
-      cur = { name: pm[1].trim(), originalSize: null, cleanedSize: null, status: 'active' };
+      cur = { name: pm[1].trim() + '_faq.csv', originalSize: null, cleanedSize: null, status: 'active' };
       result.files.push(cur);
     }
     const om = line.match(/Original Dataset Size:\s*(\d+)/);
     if (om && cur) cur.originalSize = parseInt(om[1]);
     const cm = line.match(/Cleaned Dataset Size:\s*(\d+)/);
     if (cm && cur) cur.cleanedSize = parseInt(cm[1]);
-    if (/Saved final output/.test(line) && cur) cur.status = 'done';
+    // "  Saved: black_gram/dedup_faq.csv" marks the crop as done
+    if (/Saved:.*\/dedup_faq\.csv/.test(line) && cur) cur.status = 'done';
     if (/✓ Deduplication complete/.test(line)) {
       result.stage2 = 'done';
       if (cur?.status === 'active') cur.status = 'done';
     }
   }
 
-  return result.stage1 === 'pending' && result.files.length === 0 ? null : result;
+  return result;
 }
 
 function PostFileCard({ file }) {

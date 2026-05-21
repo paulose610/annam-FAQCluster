@@ -1,8 +1,11 @@
+import json
+import re
 import shutil
 import tempfile
 from pathlib import Path
+from typing import List
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, field_validator
 
@@ -241,4 +244,156 @@ async def upload_file(dest: str = "", file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="path escapes sandbox")
     content = await file.read()
     target.write_bytes(content)
+    return {"uploaded": str(target.relative_to(APP_DATA))}
+
+
+@router.get("/app/next-state")
+def get_next_state(state: str = "", domains: List[str] = Query(default=[])):
+    slug = re.sub(r"[^a-z0-9]+", "_", state.lower()).strip("_") if state else "state"
+    pattern = re.compile(rf"^{re.escape(slug)}_(\d+)$")
+    sorted_domains = sorted(domains)
+
+    existing: list[tuple[int, Path]] = []
+    if APP_DATA.exists():
+        for p in APP_DATA.iterdir():
+            m = pattern.match(p.name)
+            if m and p.is_dir():
+                existing.append((int(m.group(1)), p))
+
+    # Return existing folder if it has matching domains
+    for idx, folder in sorted(existing):
+        meta_path = folder / "meta.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text())
+                if sorted(meta.get("domains", [])) == sorted_domains:
+                    return {
+                        "name": folder.name,
+                        "is_new": False,
+                        "existing_crops": meta.get("crops", []),
+                    }
+            except Exception:
+                pass
+
+    next_idx = max((i for i, _ in existing), default=-1) + 1
+    return {
+        "name": f"{slug}_{next_idx}",
+        "is_new": True,
+        "existing_crops": [],
+    }
+
+
+@router.get("/app/state-table")
+def get_state_table():
+    """
+    Flat rows: one per (state_folder, crop).
+    Columns: state, crop, domains, output_file, audit_file.
+    """
+    import json
+    repair_dir = APP_DATA / "outputs" / "repair"
+    rows = []
+
+    if not repair_dir.exists():
+        return {"rows": rows}
+
+    for state_dir in sorted(repair_dir.iterdir()):
+        if not state_dir.is_dir():
+            continue
+        state_name = state_dir.name
+
+        # Domains from meta.json written by pre-pipeline
+        domains: list[str] = []
+        meta_path = APP_DATA / state_name / "meta.json"
+        if meta_path.exists():
+            try:
+                domains = json.loads(meta_path.read_text()).get("domains", [])
+            except Exception:
+                pass
+
+        for crop_dir in sorted(state_dir.iterdir()):
+            if not crop_dir.is_dir() or crop_dir.name == "final":
+                continue
+
+            dedup = crop_dir / f"{state_name}_{crop_dir.name}.csv"
+            if not dedup.exists():
+                dedup = crop_dir / "dedup_faq.csv"
+            output_file = str(dedup.relative_to(APP_DATA)) if dedup.exists() else None
+
+            audit_file = None
+            for f in sorted(crop_dir.iterdir()):
+                if f.name.startswith("audit_") and f.suffix == ".csv":
+                    audit_file = str(f.relative_to(APP_DATA))
+                    break
+
+            crop_meta = {"download": False, "audit": False}
+            crop_meta_path = crop_dir / "meta.json"
+            if crop_meta_path.exists():
+                try:
+                    crop_meta = json.loads(crop_meta_path.read_text())
+                except Exception:
+                    pass
+            elif output_file:
+                crop_meta_path.write_text(json.dumps(crop_meta))
+
+            rows.append({
+                "state": state_name,
+                "crop": crop_dir.name,
+                "domains": domains,
+                "output_file": output_file,
+                "audit_file": audit_file,
+                "downloaded": crop_meta.get("download", False),
+                "audited": crop_meta.get("audit", False),
+            })
+
+    return {"rows": rows}
+
+
+@router.get("/app/output/{state}/{crop}")
+def download_output(state: str, crop: str):
+    """Download the output CSV for a state/crop, named {state}_{crop}.csv, and mark it downloaded."""
+    crop_dir = _resolve_safe(f"outputs/repair/{state}/{crop}")
+    dedup = crop_dir / f"{state}_{crop}.csv"
+    if not dedup.exists():
+        dedup = crop_dir / "dedup_faq.csv"
+    if not dedup.exists():
+        raise HTTPException(status_code=404, detail="output not found")
+    meta_path = crop_dir / "meta.json"
+    meta = {"download": False, "audit": False}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            pass
+    meta["download"] = True
+    meta_path.write_text(json.dumps(meta))
+    return FileResponse(str(dedup), filename=f"{state}_{crop}.csv")
+
+
+def _csv_slug(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
+
+
+@router.post("/files/upload-audited")
+async def upload_audited(
+    state: str = Form(...),
+    crop: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload an audited CSV for a specific state/crop."""
+    target = _resolve_safe(f"outputs/repair/{state}/{crop}/audit_{file.filename}")
+    if not target.parent.exists():
+        raise HTTPException(status_code=404, detail="crop folder not found")
+    content = await file.read()
+    target.write_bytes(content)
+
+    meta_path = target.parent / "meta.json"
+    meta = {"download": False, "audit": False}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            pass
+    meta["audit"] = True
+    meta_path.write_text(json.dumps(meta))
+
     return {"uploaded": str(target.relative_to(APP_DATA))}
