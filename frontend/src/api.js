@@ -237,6 +237,11 @@ export function popDownloadUrl(path) {
   return `/pop/download/${path}`;
 }
 
+export function popOutputDownloadUrl(state, crop, docName) {
+  const params = new URLSearchParams({ state, crop, doc_name: docName });
+  return `/pop/output?${params}`;
+}
+
 export async function deletePopFile(path) {
   const res = await fetch(`/pop/files/${path}`, { method: 'DELETE' });
   return _handleResponse(res);
@@ -244,5 +249,15 @@ export async function deletePopFile(path) {
 
 export async function deletePopFolder(path) {
   const res = await fetch(`/pop/folders/${path}`, { method: 'DELETE' });
+  return _handleResponse(res);
+}
+
+export async function uploadPopAuditedFile(file, state, crop, docName) {
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('state', state);
+  fd.append('crop', crop);
+  fd.append('doc_name', docName);
+  const res = await fetch('/pop/upload-audited', { method: 'POST', body: fd });
   return _handleResponse(res);
 }

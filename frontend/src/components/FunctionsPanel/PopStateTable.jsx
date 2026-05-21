@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { RefreshCw, Download, Upload, FolderPlus, Trash2 } from 'lucide-react';
-import { getPopStateTable, uploadPopFile, createPopFolder, popDownloadUrl, deletePopFile, deletePopFolder } from '../../api.js';
+import { getPopStateTable, uploadPopFile, createPopFolder, popDownloadUrl, popOutputDownloadUrl, deletePopFile, deletePopFolder, uploadPopAuditedFile } from '../../api.js';
 import ColumnFilter from './ColumnFilter.jsx';
 
 const inputClass =
@@ -65,6 +65,81 @@ function AutocompleteInput({ value, onChange, suggestions, placeholder, classNam
         document.body
       )}
     </>
+  );
+}
+
+function PopAuditCell({ row, onUploaded }) {
+  const inputRef = useRef(null);
+  const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  async function handleFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      await uploadPopAuditedFile(file, row.state, row.crop, row.doc_name);
+      onUploaded?.();
+    } catch (err) {
+      alert(`Upload failed: ${err.message}`);
+    } finally {
+      setUploading(false);
+      e.target.value = '';
+    }
+  }
+
+  async function handleDelete() {
+    if (!row.audit_file) return;
+    if (!window.confirm('Delete audited file?')) return;
+    setDeleting(true);
+    try {
+      await deletePopFile(row.audit_file);
+      onUploaded?.();
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-1.5">
+      {row.audit_file && (
+        <a
+          href={popDownloadUrl(row.audit_file)}
+          className="flex items-center gap-1 text-[10px] text-green-400 hover:text-green-300 transition-colors"
+          download
+        >
+          <Download size={11} /> {row.audit_file.split('/').pop()}
+        </a>
+      )}
+      <input ref={inputRef} type="file" className="hidden" onChange={handleFile} disabled={uploading} />
+      <button
+        className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors cursor-pointer
+          ${uploading
+            ? 'border-border/40 text-muted-foreground/30 cursor-not-allowed'
+            : 'border-border text-muted-foreground hover:border-primary hover:text-primary'
+          }`}
+        onClick={() => inputRef.current?.click()}
+        disabled={uploading}
+      >
+        <Upload size={11} />
+        {uploading ? 'uploading…' : row.audit_file ? 'replace' : 'upload'}
+      </button>
+      {row.audit_file && (
+        <button
+          className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors cursor-pointer
+            ${deleting
+              ? 'border-border/40 text-muted-foreground/30 cursor-not-allowed'
+              : 'border-destructive/40 text-destructive/70 hover:border-destructive hover:text-destructive hover:bg-destructive/5'
+            }`}
+          onClick={handleDelete}
+          disabled={deleting}
+        >
+          <Trash2 size={11} />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -202,6 +277,9 @@ export default function PopStateTable({ refreshKey }) {
 
   const [stateFilter, setStateFilter] = useState([]);
   const [cropFilter, setCropFilter] = useState([]);
+  const [pdfFilter, setPdfFilter] = useState([]);
+  const [outputFilter, setOutputFilter] = useState([]);
+  const [auditFilter, setAuditFilter] = useState([]);
 
   async function load() {
     setLoading(true);
@@ -232,12 +310,19 @@ export default function PopStateTable({ refreshKey }) {
   const filterStateOptions = stateOptions;
   const filterCropOptions = [...new Set(allRows.map(r => r.crop).filter(Boolean))].sort();
 
+  const anyStatusFilter = pdfFilter.length > 0 || outputFilter.length > 0 || auditFilter.length > 0;
+
   const filtered = allRows.filter(r =>
     (stateFilter.length === 0 || stateFilter.includes(r.state)) &&
-    (cropFilter.length === 0 || (r.crop ? cropFilter.includes(r.crop) : false))
+    (cropFilter.length === 0 || (r.crop ? cropFilter.includes(r.crop) : false)) &&
+    (!r.is_empty || !anyStatusFilter) &&
+    (r.is_empty || pdfFilter.length === 0 || pdfFilter.includes(r.processed ? 'processed' : 'not processed')) &&
+    (r.is_empty || outputFilter.length === 0 || outputFilter.includes(r.downloaded ? 'downloaded' : 'not downloaded')) &&
+    (r.is_empty || auditFilter.length === 0 || auditFilter.includes(r.audited ? 'audited' : 'not audited'))
   );
 
-  const anyFilter = stateFilter.length > 0 || cropFilter.length > 0;
+  const anyFilter = stateFilter.length > 0 || cropFilter.length > 0
+    || pdfFilter.length > 0 || outputFilter.length > 0 || auditFilter.length > 0;
 
   // Only non-empty rows with a PDF are selectable/deletable
   const selectableFiltered = filtered.filter(r => !r.is_empty && r.doc_path);
@@ -393,15 +478,22 @@ export default function PopStateTable({ refreshKey }) {
                     <ColumnFilter label="Crop" options={filterCropOptions} selected={cropFilter} onChange={setCropFilter} />
                   </th>
                   <th className="text-left px-3 py-2 font-semibold text-muted-foreground text-[11px] uppercase tracking-wide">Doc</th>
-                  <th className="text-left px-3 py-2 font-semibold text-muted-foreground whitespace-nowrap text-[11px] uppercase tracking-wide">PDF</th>
-                  <th className="text-left px-3 py-2 font-semibold text-muted-foreground whitespace-nowrap text-[11px] uppercase tracking-wide">Output</th>
+                  <th className="text-left px-3 py-2 whitespace-nowrap">
+                    <ColumnFilter label="PDF" options={['processed', 'not processed']} selected={pdfFilter} onChange={setPdfFilter} />
+                  </th>
+                  <th className="text-left px-3 py-2 whitespace-nowrap">
+                    <ColumnFilter label="Output" options={['downloaded', 'not downloaded']} selected={outputFilter} onChange={setOutputFilter} />
+                  </th>
+                  <th className="text-left px-3 py-2 whitespace-nowrap">
+                    <ColumnFilter label="Audit" options={['audited', 'not audited']} selected={auditFilter} onChange={setAuditFilter} />
+                  </th>
                   <th className="px-3 py-2 w-12"></th>
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 ? (
                   <tr>
-                    <td colSpan={7} className="px-4 py-8 text-center text-sm text-muted-foreground italic">
+                    <td colSpan={8} className="px-4 py-8 text-center text-sm text-muted-foreground italic">
                       No rows match the current filters.
                     </td>
                   </tr>
@@ -430,6 +522,7 @@ export default function PopStateTable({ refreshKey }) {
                               : 'Empty folder — upload a PDF to get started'
                             }
                           </td>
+                          <td className="px-3 py-2" />
                           <td className="px-3 py-2" />
                         </tr>
                       );
@@ -465,8 +558,8 @@ export default function PopStateTable({ refreshKey }) {
                         <td className="px-3 py-2 align-top whitespace-nowrap">
                           {row.output_path ? (
                             <a
-                              href={popDownloadUrl(row.output_path)}
-                              className="flex items-center gap-1 text-[10px] text-green-400 hover:text-green-300 transition-colors"
+                              href={popOutputDownloadUrl(row.state, row.crop, row.doc_name)}
+                              className={`flex items-center gap-1 text-[10px] transition-colors ${row.downloaded ? 'text-green-400 hover:text-green-300' : 'text-primary hover:text-primary/80'}`}
                               download
                             >
                               <Download size={11} /> docx
@@ -474,6 +567,9 @@ export default function PopStateTable({ refreshKey }) {
                           ) : (
                             <span className="text-muted-foreground/30">—</span>
                           )}
+                        </td>
+                        <td className="px-3 py-2 align-top">
+                          <PopAuditCell row={row} onUploaded={load} />
                         </td>
                         <td className="px-3 py-2 align-middle">
                           <button

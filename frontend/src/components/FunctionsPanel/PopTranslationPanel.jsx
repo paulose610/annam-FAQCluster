@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Square } from 'lucide-react';
+import { Square, FileText } from 'lucide-react';
 import { MultiSelector, StateSelector } from './RunTile.jsx';
 import { getPopStates, getPopCrops, getPopDocs, runPop, getJob, stopJob } from '../../api.js';
 import PopStateTable from './PopStateTable.jsx';
@@ -9,6 +9,82 @@ const inputClass =
   'w-full bg-input border border-border rounded-md px-2 py-1.5 text-sm text-foreground placeholder:text-muted-foreground/60 focus:outline-none focus:ring-2 focus:ring-ring transition-shadow';
 
 const labelClass = 'text-xs font-medium text-foreground/70';
+
+function parsePopOutput(stdout) {
+  if (!stdout) return null;
+  const lines = stdout.split('\n');
+  let totalDocs = null;
+  const docs = [];
+  let currentIdx = -1;
+
+  for (const line of lines) {
+    const totalMatch = line.match(/\[POP\] Total docs: (\d+)/);
+    if (totalMatch) { totalDocs = parseInt(totalMatch[1]); continue; }
+
+    const processingMatch = line.match(/\[POP\] Processing: (.+)/);
+    if (processingMatch) {
+      docs.push({ name: processingMatch[1].trim(), pagesTotal: null, pagesDone: 0, status: 'running' });
+      currentIdx = docs.length - 1;
+      continue;
+    }
+
+    const startedMatch = line.match(/Translation stage started \| pages=(\d+)/);
+    if (startedMatch && currentIdx >= 0) {
+      docs[currentIdx].pagesTotal = parseInt(startedMatch[1]);
+      continue;
+    }
+
+    const progressMatch = line.match(/Translation progress \| completed (\d+)\/(\d+)/);
+    if (progressMatch && currentIdx >= 0) {
+      docs[currentIdx].pagesDone = parseInt(progressMatch[1]);
+      docs[currentIdx].pagesTotal = parseInt(progressMatch[2]);
+      continue;
+    }
+
+    if (line.trim() === 'DONE' && currentIdx >= 0) {
+      docs[currentIdx].status = 'done';
+      continue;
+    }
+  }
+
+  return { totalDocs, docs };
+}
+
+function PopProgress({ stdout }) {
+  const data = parsePopOutput(stdout);
+  if (!data || (data.totalDocs === null && data.docs.length === 0)) return null;
+
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border/50 bg-muted/10 px-3 py-2">
+      {data.totalDocs !== null && (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <FileText size={11} />
+          <span>{data.docs.length} / {data.totalDocs} docs</span>
+        </div>
+      )}
+      {data.docs.map((doc, i) => (
+        <div key={i} className="flex flex-col gap-1">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-foreground truncate flex-1 min-w-0" title={doc.name}>{doc.name}</span>
+            {doc.pagesTotal !== null && (
+              <span className="text-[10px] text-muted-foreground shrink-0">
+                {doc.pagesDone}/{doc.pagesTotal} pages
+              </span>
+            )}
+          </div>
+          {doc.pagesTotal !== null && (
+            <div className="h-1 w-full bg-muted/50 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all duration-300 ${doc.status === 'done' ? 'bg-green-500' : 'bg-blue-400 animate-pulse'}`}
+                style={{ width: `${Math.round((doc.pagesDone / doc.pagesTotal) * 100)}%` }}
+              />
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const POP_TILE_KEY = 'tile:pop-translation';
 
@@ -153,19 +229,22 @@ export default function PopTranslationPanel({ onJobCreated }) {
       <div className="w-full max-w-md bg-card rounded-lg border border-border shadow-sm p-5 flex flex-col gap-4">
 
       {isRunning && (
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
-            <span className="text-sm font-bold text-foreground">Running</span>
-            {jobLabel && <span className="text-xs bg-accent/50 border border-border rounded px-1.5 py-0.5 text-foreground">{jobLabel}</span>}
+        <>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse flex-shrink-0" />
+              <span className="text-sm font-bold text-foreground">Running</span>
+              {jobLabel && <span className="text-xs bg-accent/50 border border-border rounded px-1.5 py-0.5 text-foreground">{jobLabel}</span>}
+            </div>
+            <button
+              className="flex items-center gap-1 px-2.5 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 text-xs transition-colors cursor-pointer"
+              onClick={handleStop}
+            >
+              <Square size={11} /> Stop
+            </button>
           </div>
-          <button
-            className="flex items-center gap-1 px-2.5 py-1 rounded border border-destructive/40 text-destructive hover:bg-destructive/10 text-xs transition-colors cursor-pointer"
-            onClick={handleStop}
-          >
-            <Square size={11} /> Stop
-          </button>
-        </div>
+          {jobData?.stdout && <PopProgress stdout={jobData.stdout} />}
+        </>
       )}
 
       {isSettled && (

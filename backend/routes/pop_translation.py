@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 import subprocess
@@ -7,7 +8,7 @@ from pathlib import Path
 from typing import List, Optional
 
 import _job_ctl
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -286,6 +287,7 @@ def _run_pop_sync(req: PopRequest) -> None:
 
     env = {**os.environ}
 
+    print(f"[POP] Total docs: {len(pdfs)}", flush=True)
     for pdf in pdfs:
         _job_ctl.check_cancel()
         doc_name = pdf.stem
@@ -322,6 +324,17 @@ def _run_pop_sync(req: PopRequest) -> None:
         if proc.returncode != 0 and not _job_ctl.is_cancelled(_job_ctl.current_job_id()):
             raise subprocess.CalledProcessError(proc.returncode, cmd)
 
+        final_dir = workdir / "final_output"
+        if final_dir.is_dir() and sorted(final_dir.glob("*.docx")):
+            meta_path = workdir / "meta.json"
+            existing = {"download": False, "audit": False}
+            if meta_path.exists():
+                try:
+                    existing = json.loads(meta_path.read_text())
+                except Exception:
+                    pass
+            meta_path.write_text(json.dumps(existing))
+
     print(f"\n[POP] All documents processed for {req.state}/{req.crop}", flush=True)
 
 
@@ -343,13 +356,16 @@ def get_pop_state_table():
             continue
         crop_dirs = [d for d in sorted(state_dir.iterdir()) if d.is_dir() and not d.name.startswith('.')]
         if not crop_dirs:
-            # Entirely empty state folder — no crop subdirs
             rows.append({
                 "state": state_dir.name,
                 "crop": None,
                 "doc_name": None,
                 "doc_path": None,
                 "output_path": None,
+                "audit_file": None,
+                "processed": False,
+                "downloaded": False,
+                "audited": False,
                 "is_empty": True,
             })
             continue
@@ -362,26 +378,101 @@ def get_pop_state_table():
                     "doc_name": None,
                     "doc_path": None,
                     "output_path": None,
+                    "audit_file": None,
+                    "processed": False,
+                    "downloaded": False,
+                    "audited": False,
                     "is_empty": True,
                 })
             else:
                 for pdf in pdfs:
                     doc_stem = pdf.stem
+                    doc_folder = crop_dir / doc_stem
+                    final_dir = doc_folder / "final_output"
                     output_path = None
-                    final_dir = crop_dir / doc_stem / "final_output"
-                    if final_dir.is_dir():
-                        docx_list = sorted(final_dir.glob("*.docx"))
-                        if docx_list:
-                            output_path = str(docx_list[0].relative_to(POP_WORK_DIR))
+                    audit_file = None
+                    processed = final_dir.is_dir()
+                    downloaded = False
+                    audited = False
+                    if processed:
+                        meta_path = doc_folder / "meta.json"
+                        if meta_path.exists():
+                            try:
+                                m = json.loads(meta_path.read_text())
+                                downloaded = bool(m.get("download", False))
+                                audited = bool(m.get("audit", False))
+                            except Exception:
+                                pass
+                        if final_dir.is_dir():
+                            docx_list = sorted(final_dir.glob("*.docx"))
+                            if docx_list:
+                                output_path = str(docx_list[0].relative_to(POP_WORK_DIR))
+                            for f in sorted(final_dir.iterdir()):
+                                if f.name.startswith("audit_"):
+                                    audit_file = str(f.relative_to(POP_WORK_DIR))
+                                    break
                     rows.append({
                         "state": state_dir.name,
                         "crop": crop_dir.name,
                         "doc_name": pdf.name,
                         "doc_path": str(pdf.relative_to(POP_WORK_DIR)),
                         "output_path": output_path,
+                        "audit_file": audit_file,
+                        "processed": processed,
+                        "downloaded": downloaded,
+                        "audited": audited,
                         "is_empty": False,
                     })
     return {"rows": rows}
+
+
+@router.get("/pop/output")
+def download_pop_output(state: str, crop: str, doc_name: str):
+    """Serve the translated DOCX for a doc and mark it downloaded in meta.json."""
+    _safe_name(state)
+    _safe_name(crop)
+    doc_stem = Path(doc_name).stem
+    final_dir = POP_WORK_DIR / "Data" / state / crop / doc_stem / "final_output"
+    docx_list = sorted(final_dir.glob("*.docx")) if final_dir.is_dir() else []
+    if not docx_list:
+        raise HTTPException(status_code=404, detail="output not found")
+    meta_path = POP_WORK_DIR / "Data" / state / crop / doc_stem / "meta.json"
+    meta = {"download": False, "audit": False}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            pass
+    meta["download"] = True
+    meta_path.write_text(json.dumps(meta))
+    return FileResponse(str(docx_list[0]), filename=docx_list[0].name)
+
+
+@router.post("/pop/upload-audited")
+async def upload_pop_audited(
+    state: str = Form(...),
+    crop: str = Form(...),
+    doc_name: str = Form(...),
+    file: UploadFile = File(...),
+):
+    """Upload an audited file for a POP doc; stored in final_output/ with audit_ prefix."""
+    _safe_name(state)
+    _safe_name(crop)
+    doc_stem = Path(doc_name).stem
+    final_output_dir = POP_WORK_DIR / "Data" / state / crop / doc_stem / "final_output"
+    final_output_dir.mkdir(parents=True, exist_ok=True)
+    target = final_output_dir / f"audit_{file.filename}"
+    target.write_bytes(await file.read())
+    meta_path = POP_WORK_DIR / "Data" / state / crop / doc_stem / "meta.json"
+    meta = {"download": False, "audit": False}
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text())
+        except Exception:
+            pass
+    meta["audit"] = True
+    meta_path.write_text(json.dumps(meta))
+    return {"uploaded": str(target.relative_to(POP_WORK_DIR))}
 
 
 @router.post("/run/pop")

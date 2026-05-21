@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { RefreshCw, Download, Upload, Trash2 } from 'lucide-react';
-import { getStateTable, uploadAuditedFile, downloadUrl, outputDownloadUrl, deleteFolder } from '../../api.js';
+import { getStateTable, uploadAuditedFile, downloadUrl, outputDownloadUrl, deleteFolder, deleteFile } from '../../api.js';
 import ColumnFilter from './ColumnFilter.jsx';
 
 function AuditCell({ row, onUploaded }) {
   const inputRef = useRef(null);
   const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   async function handleFile(e) {
     const file = e.target.files?.[0];
@@ -19,6 +20,20 @@ function AuditCell({ row, onUploaded }) {
     } finally {
       setUploading(false);
       e.target.value = '';
+    }
+  }
+
+  async function handleDelete() {
+    if (!row.audit_file) return;
+    if (!window.confirm('Delete audited file?')) return;
+    setDeleting(true);
+    try {
+      await deleteFile(row.audit_file);
+      onUploaded?.();
+    } catch (err) {
+      alert(`Delete failed: ${err.message}`);
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -46,6 +61,19 @@ function AuditCell({ row, onUploaded }) {
         <Upload size={11} />
         {uploading ? 'uploading…' : row.audit_file ? 'replace' : 'upload'}
       </button>
+      {row.audit_file && (
+        <button
+          className={`flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded border transition-colors cursor-pointer
+            ${deleting
+              ? 'border-border/40 text-muted-foreground/30 cursor-not-allowed'
+              : 'border-destructive/40 text-destructive/70 hover:border-destructive hover:text-destructive hover:bg-destructive/5'
+            }`}
+          onClick={handleDelete}
+          disabled={deleting}
+        >
+          <Trash2 size={11} />
+        </button>
+      )}
     </div>
   );
 }
