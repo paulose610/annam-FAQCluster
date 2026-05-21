@@ -7,6 +7,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from backend import jobs  # noqa: F401 — must import first to install _JobStdout on sys.stdout
 from backend.routes import faq_cluster, pop_translation, files, jobs_router
 from backend.routes.files import app_data_tree
@@ -31,3 +32,10 @@ def app_combined_tree():
     faq = app_data_tree()
     pop = get_pop_data_tree()
     return {**faq, "pop_files": pop["files"]}
+
+
+# Serve the compiled React frontend — only active when dist/ exists (production container).
+# Must be mounted last so all API routes above take precedence.
+_DIST = ROOT_DIR / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/", StaticFiles(directory=str(_DIST), html=True), name="frontend")

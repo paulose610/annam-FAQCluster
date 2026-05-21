@@ -7,9 +7,11 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import List, Optional
 
+import httpx
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel, field_validator, model_validator
 
@@ -21,9 +23,66 @@ router = APIRouter()
 _ROOT_DIR = Path(__file__).resolve().parent.parent.parent  # FAQCluster/
 _RUN_PIPELINE = _ROOT_DIR / 'run_pipeline.py'
 
+# When set, pipeline jobs are forwarded to the pipeline container's HTTP API
+# instead of spawning a local subprocess. Set via docker-compose env var.
+_PIPELINE_API_URL = os.environ.get("PIPELINE_API_URL", "").rstrip("/")
+
 
 def slug(name: str) -> str:
     return re.sub(r'[^a-z0-9]+', '_', name.lower()).strip('_')
+
+
+def _run_one_crop_via_api(req: "PipelineRequest", resolved_raw: str, crop: str, output_dir_str: str) -> int:
+    """Forward a single-crop pipeline run to the pipeline container's HTTP API.
+    Returns 0 on success, non-zero on failure.
+    """
+    import _job_ctl
+
+    payload = {
+        "raw_file": resolved_raw,
+        "crop": crop,
+        "model": req.model,
+        "gpu_id": req.gpu_id,
+        "batch_size": req.batch_size,
+        "grid_mode": req.grid_mode,
+        "output_dir": output_dir_str,
+        "api_key": req.api_key or "",
+        "skip_phase1": getattr(req, "skip_phase1", False),
+        "skip_phase2": getattr(req, "skip_phase2", False),
+        "skip_repair": getattr(req, "skip_repair", False),
+        "skip_unique_q": getattr(req, "skip_unique_q", False),
+        "skip_corpus_filter": getattr(req, "skip_corpus_filter", False),
+        "skip_qa_gen": getattr(req, "skip_qa_gen", False),
+    }
+
+    resp = httpx.post(f"{_PIPELINE_API_URL}/run/pipeline", json=payload, timeout=30)
+    resp.raise_for_status()
+    remote_job_id = resp.json()["job_id"]
+
+    seen = 0
+    while True:
+        _job_ctl.check_cancel()
+        time.sleep(2)
+
+        try:
+            status_resp = httpx.get(f"{_PIPELINE_API_URL}/jobs/{remote_job_id}", timeout=10)
+            if status_resp.status_code == 200:
+                data = status_resp.json()
+                stdout = data.get("stdout", "")
+                if len(stdout) > seen:
+                    print(stdout[seen:], end="", flush=True)
+                    seen = len(stdout)
+                if data["status"] in ("done", "failed", "stopped"):
+                    return 0 if data["status"] == "done" else 1
+        except httpx.RequestError:
+            pass
+
+        if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
+            try:
+                httpx.post(f"{_PIPELINE_API_URL}/jobs/{remote_job_id}/stop", timeout=5)
+            except Exception:
+                pass
+            return -1
 
 
 # --- Pydantic models ---
@@ -167,58 +226,58 @@ def _run_pipeline_sync(r: PipelineRequest) -> None:
         crops = _df["Crop"].dropna().str.strip().unique().tolist()
         print(f"[INFO] Found {len(crops)} unique crop(s): {', '.join(crops)}")
 
+    out_dir_str = str(_resolve_safe(r.output_dir))
+
     for crop in crops:
         _job_ctl.check_cancel()
         (out_base / slug(crop)).mkdir(parents=True, exist_ok=True)
-
-        # Run the full per-crop pipeline as a subprocess so that:
-        # (1) stop button immediately kills it via os.killpg on the process group, and
-        # (2) the auto-skip logic in run_pipeline.py:main() skips already-done stages.
-        cmd = [
-            sys.executable, '-u', str(_RUN_PIPELINE),
-            '--raw-file',   resolved_raw,
-            '--crop',       crop,
-            '--model',      r.model,
-            '--gpu-id',     str(r.gpu_id),
-            '--batch-size', str(r.batch_size),
-            '--grid-mode',  r.grid_mode,
-            '--output-dir', str(_resolve_safe(r.output_dir)),
-        ]
-        if r.api_key:
-            cmd += ['--api-key', r.api_key]
-        if r.skip_phase1:        cmd += ['--skip-phase1']
-        if r.skip_phase2:        cmd += ['--skip-phase2']
-        if r.skip_repair:        cmd += ['--skip-repair']
-        if r.skip_unique_q:      cmd += ['--skip-unique-q']
-        if r.skip_corpus_filter: cmd += ['--skip-corpus-filter']
-        if r.skip_qa_gen:        cmd += ['--skip-qa-gen']
-
         print(f"[INFO] Starting pipeline for '{crop}'...")
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, preexec_fn=os.setsid, bufsize=1,
-        )
-        _job_ctl.register_proc(proc)
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            # Race-condition fix: cancel() may have fired before register_proc();
-            # kill the proc here if it's still running.
-            if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
-                if proc.poll() is None:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
-                        proc.kill()
-                break
-        proc.wait()
-        _job_ctl.deregister_proc()
 
-        # Unconditional check: raises JobCancelled whether subprocess was killed (-9)
-        # or completed with returncode=0 just as the user clicked Stop.
+        if _PIPELINE_API_URL:
+            rc = _run_one_crop_via_api(r, resolved_raw, crop, out_dir_str)
+        else:
+            # Run as a local subprocess so stop button can kill it via os.killpg.
+            cmd = [
+                sys.executable, '-u', str(_RUN_PIPELINE),
+                '--raw-file',   resolved_raw,
+                '--crop',       crop,
+                '--model',      r.model,
+                '--gpu-id',     str(r.gpu_id),
+                '--batch-size', str(r.batch_size),
+                '--grid-mode',  r.grid_mode,
+                '--output-dir', out_dir_str,
+            ]
+            if r.api_key:
+                cmd += ['--api-key', r.api_key]
+            if r.skip_phase1:        cmd += ['--skip-phase1']
+            if r.skip_phase2:        cmd += ['--skip-phase2']
+            if r.skip_repair:        cmd += ['--skip-repair']
+            if r.skip_unique_q:      cmd += ['--skip-unique-q']
+            if r.skip_corpus_filter: cmd += ['--skip-corpus-filter']
+            if r.skip_qa_gen:        cmd += ['--skip-qa-gen']
+
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, preexec_fn=os.setsid, bufsize=1,
+            )
+            _job_ctl.register_proc(proc)
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
+                    if proc.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except Exception:
+                            proc.kill()
+                    break
+            proc.wait()
+            _job_ctl.deregister_proc()
+            rc = proc.returncode
+
         _job_ctl.check_cancel()
 
-        if proc.returncode != 0:
-            print(f"[WARN] Crop '{crop}' failed (returncode={proc.returncode})")
+        if rc != 0:
+            print(f"[WARN] Crop '{crop}' failed (returncode={rc})")
             failed.append(crop)
 
     if failed:
@@ -390,53 +449,61 @@ def _run_full_sync(r: FullRequest) -> None:
         print(f"[INFO] Skipping {len(skipped_crops)} already-completed crop(s): {', '.join(skipped_crops)}")
     print(f"[INFO] Found {len(crops_to_run)} unique crop(s): {', '.join(crops_to_run)}")
 
+    out_dir_str = str(_resolve_safe(r.output_dir))
+    # Build a minimal PipelineRequest-like object for _run_one_crop_via_api
+    class _FakeReq:
+        model = r.model; api_key = r.api_key; gpu_id = r.gpu_id
+        batch_size = r.batch_size; grid_mode = r.grid_mode
+        skip_phase1 = False; skip_phase2 = False; skip_repair = False
+        skip_unique_q = False; skip_corpus_filter = False
+        skip_qa_gen = r.skip_qa_gen
+
     failed = []
     for crop in crops_to_run:
         _job_ctl.check_cancel()
         (out_base / slug(crop)).mkdir(parents=True, exist_ok=True)
-
-        cmd = [
-            sys.executable, '-u', str(_RUN_PIPELINE),
-            '--raw-file',   effective_raw,
-            '--crop',       crop,
-            '--model',      r.model,
-            '--gpu-id',     str(r.gpu_id),
-            '--batch-size', str(r.batch_size),
-            '--grid-mode',  r.grid_mode,
-            '--output-dir', str(_resolve_safe(r.output_dir)),
-        ]
-        if r.api_key:
-            cmd += ['--api-key', r.api_key]
-        if r.skip_qa_gen:
-            cmd += ['--skip-qa-gen']
-
         print(f"[INFO] Starting pipeline for '{crop}'...")
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, preexec_fn=os.setsid, bufsize=1,
-        )
-        _job_ctl.register_proc(proc)
-        for line in proc.stdout:
-            print(line, end="", flush=True)
-            # Race-condition fix: cancel() may have fired before register_proc();
-            # kill the proc here if it's still running.
-            if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
-                if proc.poll() is None:
-                    try:
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    except Exception:
-                        proc.kill()
-                break
-        proc.wait()
-        _job_ctl.deregister_proc()
 
-        # Unconditional check: raises JobCancelled whether subprocess was killed (-9)
-        # or completed with returncode=0 just as the user clicked Stop.
-        # This also prevents post_run_dedup from running after a stop.
+        if _PIPELINE_API_URL:
+            rc = _run_one_crop_via_api(_FakeReq(), effective_raw, crop, out_dir_str)
+        else:
+            cmd = [
+                sys.executable, '-u', str(_RUN_PIPELINE),
+                '--raw-file',   effective_raw,
+                '--crop',       crop,
+                '--model',      r.model,
+                '--gpu-id',     str(r.gpu_id),
+                '--batch-size', str(r.batch_size),
+                '--grid-mode',  r.grid_mode,
+                '--output-dir', out_dir_str,
+            ]
+            if r.api_key:
+                cmd += ['--api-key', r.api_key]
+            if r.skip_qa_gen:
+                cmd += ['--skip-qa-gen']
+
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, preexec_fn=os.setsid, bufsize=1,
+            )
+            _job_ctl.register_proc(proc)
+            for line in proc.stdout:
+                print(line, end="", flush=True)
+                if _job_ctl.is_cancelled(_job_ctl.current_job_id()):
+                    if proc.poll() is None:
+                        try:
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        except Exception:
+                            proc.kill()
+                    break
+            proc.wait()
+            _job_ctl.deregister_proc()
+            rc = proc.returncode
+
         _job_ctl.check_cancel()
 
-        if proc.returncode != 0:
-            print(f"[WARN] Crop '{crop}' failed (returncode={proc.returncode})")
+        if rc != 0:
+            print(f"[WARN] Crop '{crop}' failed (returncode={rc})")
             failed.append(crop)
         elif not r.skip_post_pipeline:
             try:

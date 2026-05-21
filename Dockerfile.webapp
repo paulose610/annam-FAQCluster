@@ -1,0 +1,44 @@
+# ── Stage 1: Build the React frontend ───────────────────────────────────────
+FROM node:20-alpine AS frontend-builder
+
+WORKDIR /app/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ ./
+RUN npm run build
+
+
+# ── Stage 2: Python web app runtime ─────────────────────────────────────────
+FROM python:3.11-slim
+
+# System deps: pandoc (POP-Translation DOCX output) + poppler-utils (pdf2image)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pandoc \
+        poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python web deps (no torch/vllm/hdbscan/umap)
+COPY requirements-webapp.txt .
+RUN pip install --no-cache-dir -r requirements-webapp.txt
+
+# Copy application code
+COPY backend/          backend/
+COPY POP-Translation/  POP-Translation/
+COPY pre_pipeline/     pre_pipeline/
+COPY post_pipeline/    post_pipeline/
+COPY run_pre_pipeline.py  .
+COPY run_post_pipeline.py .
+COPY _job_ctl.py          .
+COPY config/              config/
+
+# Copy built frontend from stage 1
+COPY --from=frontend-builder /app/frontend/dist frontend/dist/
+
+# Create data directories (will be overridden by volumes in production)
+RUN mkdir -p app-data outputs POP_Work
+
+EXPOSE 8030
+
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8030"]
