@@ -1,7 +1,7 @@
 services:
 
   webapp:
-    image: vicharanashala/faqcluster-webapp:latest
+    image: faqcluster-webapp:local
     ports:
       - "8030:8030"        # Only this port is exposed to the outside world
     environment:
@@ -17,7 +17,7 @@ services:
     restart: unless-stopped
 
   pipeline:
-    image: vicharanashala/faqcluster-pipeline:latest
+    image: faqcluster-pipeline:local
     expose:
       - "7000"             # Internal only — not reachable from outside the VM
     environment:

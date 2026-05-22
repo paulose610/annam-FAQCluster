@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import re
 import argparse
 import pandas as pd
 from mapping import crop_mapping, get_filtered_mapping
@@ -36,7 +37,7 @@ if __name__ == "__main__":
         .str.replace(r"\s+", " ", regex=True)
     )
 
-    normalized_mapping = {k.strip().lower(): v for k, v in effective_mapping.items()}
+    normalized_mapping = {re.sub(r"\s+", " ", k.strip().lower()): v for k, v in effective_mapping.items()}
 
     df["Crop"] = df["Crop"].map(normalized_mapping)
     df = df[df["Crop"].notna()]

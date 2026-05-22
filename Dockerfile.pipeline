@@ -14,9 +14,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install vLLM (pinned build compatible with torch 2.1 + CUDA 12.1)
-RUN pip install --no-cache-dir "vllm>=0.4.0,<0.7.0"
-
 # Install FastAPI + uvicorn for pipeline_server.py
 RUN pip install --no-cache-dir "fastapi>=0.110.0" "uvicorn[standard]>=0.29.0" "pydantic>=2.0.0"
 
