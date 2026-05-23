@@ -25,7 +25,7 @@ Usage:
   python analysis/cluster_repair.py \\
       --raw-file data/raw/punjab_maize_raw.csv \\
       --crop "Maize Makka" \\
-      --model /home/kshitij/models/qwen2.5-7b-instruct \\
+      --model /home/paulose/models/qwen2.5-7b-instruct \\
       --gpu-id 0 \\
       --mode full
 """
@@ -39,7 +39,7 @@ import logging
 
 SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-REPAIR_BASE  = PROJECT_ROOT / 'outputs' / 'repair'
+REPAIR_BASE  = PROJECT_ROOT / 'app-data' / 'outputs' / 'repair'
 
 sys.path.insert(0, str(SCRIPT_DIR))
 # Import needed for pickle deserialization of ClusteringResult
@@ -48,7 +48,7 @@ from hyperparameter_tuning import (                        # noqa: F401
     run_clustering, phase1_fast_screening,
     generate_param_grid, load_stopwords
 )
-from llm_evaluator_hf import LocalHFJudge, evaluate_config_with_hf  # noqa: F401
+from llm_evaluator_hf import LocalHFJudge, evaluate_config_with_hf, _JSON_SYSTEM_PROMPT  # noqa: F401
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -132,26 +132,28 @@ def step_a_diverse_reps(clusters: dict, result_df: pd.DataFrame,
 # Extended LLM judge — adds JSON-output methods for repair operations
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _safe_int(x):
+    """Convert x to int if possible; return None if x is a dict, list, or otherwise uncastable."""
+    if isinstance(x, bool):
+        return None
+    if isinstance(x, (int, float)):
+        return int(x)
+    if isinstance(x, str):
+        try:
+            return int(x)
+        except ValueError:
+            return None
+    return None
+
+
 class RepairJudge(LocalHFJudge):
 
     def _gen_long(self, user_text: str, max_new_tokens: int = 300) -> str:
-        """Generate a longer response (for JSON outputs)."""
-        import torch
-        prompt = self._build_prompt(user_text)
-        enc = self.tokenizer(prompt, return_tensors="pt",
-                             truncation=True, max_length=4096).to(self.device)
-        enc.pop("token_type_ids", None)
-        with torch.no_grad():
-            out = self.model.generate(
-                **enc, max_new_tokens=max_new_tokens,
-                do_sample=False, temperature=1.0,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
-        new = out[0, enc["input_ids"].shape[1]:]
-        return self.tokenizer.decode(new, skip_special_tokens=True).strip()
+        """Generate a longer response (for JSON outputs) via the remote API."""
+        return self._call_api(user_text, max_tokens=max_new_tokens, system_prompt=_JSON_SYSTEM_PROMPT)
 
     @staticmethod
-    def _parse_json_list(self, raw: str) -> list:
+    def _parse_json_list(raw: str) -> list:
         text = re.sub(r"```json|```", "", raw).strip()
         
         m = re.search(r'\[.*\]', text, re.DOTALL)
@@ -196,12 +198,15 @@ class RepairJudge(LocalHFJudge):
             f"Identify queries that clearly ask about a DIFFERENT crop (not {crop}).\n\n"
             f"{qstr}\n\n"
             f'Return ONLY JSON: {{"off": []}} where "off" is a list of 1-based '
-            f"indices of queries NOT about {crop}. Empty list if all are about {crop}.\nJSON:"
+            f"plain integer indices of queries NOT about {crop}. "
+            f"Integers only — no objects, no strings. "
+            f'Example: {{"off": [2, 5, 7]}}. Empty list if all are about {crop}.\nJSON:'
         )
         raw  = self._gen_long(prompt, max_new_tokens=80)
         data = self._parse_json_obj(raw)
         off  = data.get("off", [])
-        return [int(i) - 1 for i in off if 1 <= int(i) <= len(queries)]
+        safe = [_safe_int(i) for i in off]
+        return [v - 1 for v in safe if v is not None and 1 <= v <= len(queries)]
 
     # ── C: Coherence diagnostic ───────────────────────────────────────────────
 
@@ -226,14 +231,9 @@ class RepairJudge(LocalHFJudge):
 
     # ── C: Split ─────────────────────────────────────────────────────────────
 
-    def split_cluster(self, queries: list, crop: str) -> list:
-        """
-        Groups queries into sub-clusters that each require the same advice.
-        Returns [{'label': str, 'indices': [0-based int]}].
-        A single-group result means no split is needed.
-        """
-        qstr = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
-        prompt = (
+    @staticmethod
+    def _split_prompt(qstr: str, crop: str) -> str:
+        return (
             f"You are an agricultural extension officer for {crop}.\n"
             f"Group these farmer queries so that ALL queries in each group need "
             f"the SAME specific practical advice.\n\n"
@@ -243,19 +243,42 @@ class RepairJudge(LocalHFJudge):
             f"- If all queries need the same advice, return one group with all indices\n"
             f'- Each "label" must be a 2-4 word topic name (e.g. "stem borer control", '
             f'"nutrient deficiency", "weed management") — never use the words '
-            f'"short description" or "group"\n\n'
+            f'"short description" or "group"\n'
+            f'- "indices" values MUST be plain integers like [1,2,3] — NOT objects\n\n'
             f"Queries:\n{qstr}\n\n"
             f"Return ONLY valid JSON array, no text before or after:\n"
             f'[{{"group":1,"label":"stem borer control","indices":[1,2,3]}},'
             f'{{"group":2,"label":"nutrient deficiency","indices":[4,5]}}]\nJSON:'
         )
-        raw       = self._gen_long(prompt, max_new_tokens=350)
-        groups_raw = self._parse_json_list(self,raw)
+
+    def split_cluster(self, queries: list, crop: str) -> list:
+        """
+        Groups queries into sub-clusters that each require the same advice.
+        Returns [{'label': str, 'indices': [0-based int]}].
+        A single-group result means no split is needed.
+        """
+        qstr = "\n".join(f"{i+1}. {q}" for i, q in enumerate(queries))
+
+        for attempt in range(2):
+            raw        = self._gen_long(self._split_prompt(qstr, crop), max_new_tokens=350)
+            groups_raw = RepairJudge._parse_json_list(raw)
+
+            # Check whether any index is non-integer (malformed LLM output)
+            bad = any(
+                not isinstance(i, (int, float))
+                for g in groups_raw
+                for i in g.get("indices", [])
+            )
+            if bad and attempt == 0:
+                logging.warning("split_cluster: non-integer indices in LLM output — retrying")
+                continue
+            break
 
         result, seen = [], set()
         for g in groups_raw:
-            idxs = [int(i) - 1 for i in g.get("indices", [])
-                    if 1 <= int(i) <= len(queries) and (int(i) - 1) not in seen]
+            raw_idxs = [_safe_int(i) for i in g.get("indices", [])]
+            idxs = [v - 1 for v in raw_idxs
+                    if v is not None and 1 <= v <= len(queries) and (v - 1) not in seen]
             seen.update(idxs)
             if idxs:
                 result.append({"label": str(g.get("label", ""))[:100], "indices": idxs})
@@ -311,8 +334,8 @@ def step_b_cross_crop(clusters: dict, judge: RepairJudge, crop: str) -> dict:
             clusters[cid]['queries'] = [queries[i] for i in keep]
             clusters[cid]['counts']  = [counts[i]  for i in keep]
             clusters[cid]['size']    = sum(clusters[cid]['counts'])
-        elif keep == 1:
-            # Cluster shrank to 1: mark for deletion
+        else:
+            # Cluster shrank to 0 or 1 query: mark for deletion
             clusters[cid]['_delete'] = True
 
         total_removed += len(off)
@@ -335,6 +358,9 @@ def step_c_split(clusters: dict, diverse_reps: dict, result_df: pd.DataFrame,
     Returns (updated_clusters, n_splits_performed).
     """
     print(f"\n{'─'*60}\nStep C: Coherence diagnostic + split  (flag on: {flag_on})\n{'─'*60}")
+    if not clusters:
+        print("  No clusters remaining — skipping split step")
+        return clusters, 0
     q2idx   = {q: i for i, q in enumerate(result_df['query_text'].tolist())}
     max_cid = max(clusters.keys())
     n_splits = 0
@@ -400,7 +426,7 @@ def step_c_split(clusters: dict, diverse_reps: dict, result_df: pd.DataFrame,
 
 
 def step_d_merge(clusters: dict, st_model, judge: RepairJudge,
-                 crop: str, sim_thresh: float = 0.82, max_pairs: int = 100) -> tuple:
+                 crop: str, sim_thresh: float = 0.75, max_pairs: int = 100) -> tuple:
     """
     Find candidate merge pairs via cosine similarity of cluster representatives,
     then LLM-confirm each pair. Absorbs smaller cluster into larger.
@@ -586,7 +612,7 @@ def run_phase1(raw_csv: Path, crop: str, grid_mode: str,
         df['query_text'] = df['QueryText'] if 'QueryText' in df.columns else df.iloc[:, 8]
 
     # Flexible crop filter (strips parentheses)
-    raw_crop_norm = df['Crop'].str.replace(r'[\(\)]', '', regex=True).str.strip()
+    raw_crop_norm = df['Crop'].str.replace(r'[\(\)]', '', regex=True).str.strip()  
     crop_norm     = re.sub(r'[\(\)]', '', crop).strip()
     df = df[raw_crop_norm == crop_norm].copy()
     print(f"  Rows for '{crop}': {len(df)}")
@@ -653,6 +679,20 @@ def run_phase2(candidates: list, out_dir: Path, model_path: str,
     p2_df = pd.DataFrame(rows)
     p2_df.to_csv(out_dir / 'phase2_scores.csv', index=False)
 
+    if p2_df.empty:
+        # No candidates were evaluated (e.g. small crop with 0 viable Phase 1 configs).
+        # Fall back to the Phase 1 candidate with the lowest coverage_efficiency.
+        if not candidates:
+            raise ValueError(
+                "No Phase 1 candidates and no Phase 2 results. "
+                "The crop may have too few unique queries to cluster."
+            )
+        best = min(candidates, key=lambda r: r.metrics.get('coverage_efficiency', 1))
+        best_cfg = str(best.config)
+        print(f"\n  WARNING: 0 candidates evaluated in Phase 2 — "
+              f"falling back to Phase 1 best: {best_cfg}")
+        return best_cfg
+
     best_cfg = p2_df.sort_values('composite_score', ascending=False).iloc[0]['config']
     print(f"\n  Best config: {best_cfg}")
     return best_cfg
@@ -670,7 +710,7 @@ def main():
                     help='Input raw CSV. Required for modes: phase1, full.')
     ap.add_argument('--crop', default='Maize Makka',
                     help='Crop name as it appears in the raw CSV Crop column.')
-    ap.add_argument('--model', default='/home/kshitij/models/qwen2.5-7b-instruct')
+    ap.add_argument('--model', default='google/gemma-4-26B-A4B-it')
     ap.add_argument('--gpu-id', type=int, default=0)
     ap.add_argument('--batch-size', type=int, default=8)
 
@@ -700,7 +740,7 @@ def main():
     ap.add_argument('--coherence-flag', default='C',
                     choices=['B', 'C'],
                     help='LLM coherence rating that triggers a split (C=strict, B=aggressive).')
-    ap.add_argument('--merge-sim', type=float, default=0.82,
+    ap.add_argument('--merge-sim', type=float, default=0.75,
                     help='Cosine similarity threshold for merge candidate pairs.')
 
     args = ap.parse_args()

@@ -32,16 +32,17 @@ Usage (local):
       --cluster-file outputs/repair/maize_makka/cluster_questions.csv \\
       --raw-file data/raw/punjab_maize_raw.csv \\
       --crop "Maize Makka" \\
-      --model /home/kshitij/models/qwen2.5-7b-instruct --gpu-id 0
+      --model /home/paulose/models/qwen2.5-7b-instruct --gpu-id 0
 
 Add --resume to skip clusters already in the checkpoint.
 """
 
-import re, sys, os, json, time, argparse
+import re, sys, os, json, time, argparse, threading
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
@@ -88,6 +89,8 @@ def parse_groups(raw: str, n: int, label: str) -> list:
 
     result, seen = [], set()
     for g in groups_raw:
+        if not isinstance(g, dict):
+            continue
         idxs = []
         for i in g.get("indices", []):
             try:
@@ -195,13 +198,16 @@ class ClaudeBatchJudge:
 # Local judge (Qwen 7B) with batching for large clusters
 # ══════════════════════════════════════════════════════════════════════════════
 
-LOCAL_BATCH = 12
+LOCAL_BATCH = 15       # gemma-4-26B-A4B-it: thinking is optional (not always-on); 15 gives good grouping
+CLUSTER_WORKERS = 4   # keep concurrent clusters low to avoid overwhelming the remote vLLM server
+_ckpt_lock = threading.Lock()
+_embed_lock = threading.Lock()  # SentenceTransformer GPU model isn't thread-safe
 
 
 def _run_local_batch(judge, questions, label, crop):
     """Single LLM call for up to LOCAL_BATCH questions."""
     prompt  = build_grouping_prompt(questions, label, crop)
-    max_tok = min(150 + len(questions) * 16, 600)
+    max_tok = min(200 + len(questions) * 40, 1500)
     raw     = judge._gen_long(prompt, max_new_tokens=max_tok)
     return parse_groups(raw, len(questions), label)
 
@@ -209,32 +215,44 @@ def _run_local_batch(judge, questions, label, crop):
 def _embed(judge, texts):
     try:
         from sentence_transformers import SentenceTransformer
-        if not hasattr(judge, '_st'):
-            judge._st = SentenceTransformer(
-                'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
-                device=judge.device)
-        return judge._st.encode(texts, batch_size=32, show_progress_bar=False,
-                                convert_to_numpy=True, normalize_embeddings=True)
+        with _embed_lock:
+            if not hasattr(judge, '_st'):
+                judge._st = SentenceTransformer(
+                    'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+                    device=judge.device)
+            return judge._st.encode(texts, batch_size=32, show_progress_bar=False,
+                                    convert_to_numpy=True, normalize_embeddings=True)
     except Exception:
         return np.eye(len(texts))
 
 
 def find_unique_questions_local(judge, questions, label, crop):
-    """Batching + cross-batch merge for large clusters with local Qwen 7B."""
+    """Batching + cross-batch merge for large clusters with local LLM."""
     n = len(questions)
     if n <= LOCAL_BATCH:
-        raw_groups = _run_local_batch(judge, questions, label, crop)
-        groups = raw_groups
+        groups = _run_local_batch(judge, questions, label, crop)
     else:
-        batches = [questions[i:i+LOCAL_BATCH] for i in range(0, n, LOCAL_BATCH)]
-        offset, global_groups = 0, []
-        for batch in batches:
-            for g in _run_local_batch(judge, batch, label, crop):
+        batches  = [questions[i:i+LOCAL_BATCH] for i in range(0, n, LOCAL_BATCH)]
+        offsets  = list(range(0, n, LOCAL_BATCH))
+
+        def _call(batch_offset):
+            batch, offset = batch_offset
+            return offset, _run_local_batch(judge, batch, label, crop)
+
+        n_workers = min(len(batches), 16)
+        with ThreadPoolExecutor(max_workers=n_workers) as ex:
+            batch_results = sorted(
+                ex.map(_call, zip(batches, offsets)),
+                key=lambda x: x[0],
+            )
+
+        global_groups = []
+        for offset, batch_groups in batch_results:
+            for g in batch_groups:
                 global_groups.append({
                     "answer_label": g["answer_label"],
                     "indices": [offset + i for i in g["indices"]],
                 })
-            offset += len(batch)
         groups = _merge_cross_batch(judge, global_groups, questions, crop)
 
     seen, result = set(), []
@@ -253,25 +271,25 @@ def find_unique_questions_local(judge, questions, label, crop):
 
 
 def _merge_cross_batch(judge, groups, questions, crop, sim_thresh=0.88):
+    # Merge by embedding similarity only — no LLM pairwise check (Gemma thinking
+    # tokens blow the 10-token budget, making A/B/C answers unreliable).
     if len(groups) <= 1:
         return groups
-    reps  = [questions[g["indices"][0]] for g in groups]
-    embs  = _embed(judge, reps)
-    sim   = embs @ embs.T
+    reps = [questions[g["indices"][0]] for g in groups]
+    embs = _embed(judge, reps)
+    sim  = embs @ embs.T
+
     absorbed = set()
     for i in range(len(groups)):
         if i in absorbed:
             continue
-        for j in range(i+1, len(groups)):
-            if j in absorbed or sim[i,j] < sim_thresh:
+        for j in range(i + 1, len(groups)):
+            if j in absorbed or sim[i, j] < sim_thresh:
                 continue
-            prompt = (f"Crop: {crop}.\nQ1: {reps[i]}\nQ2: {reps[j]}\n\n"
-                      f"Same core agricultural advice? A) YES  B) NO\nAnswer:")
-            if judge._parse_abc(judge._generate_one(prompt), default="B") == "A":
-                groups[i]["indices"].extend(groups[j]["indices"])
-                if groups[i]["answer_label"] in ("(unclassified)", ""):
-                    groups[i]["answer_label"] = groups[j]["answer_label"]
-                absorbed.add(j)
+            groups[i]["indices"].extend(groups[j]["indices"])
+            if groups[i]["answer_label"] in ("(unclassified)", ""):
+                groups[i]["answer_label"] = groups[j]["answer_label"]
+            absorbed.add(j)
     return [g for i, g in enumerate(groups) if i not in absorbed]
 
 
@@ -280,7 +298,7 @@ def _merge_cross_batch(judge, groups, questions, crop, sim_thresh=0.88):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def cross_cluster_dedup(uq_rows: list, freq_map: dict,
-                        sim_thresh: float = 0.92) -> list:
+                        sim_thresh: float = 0.92, gpu_id: int = 0) -> list:
     """
     Merge rows from DIFFERENT clusters if their representative questions are
     near-identical in embedding space (cosine >= sim_thresh).
@@ -293,7 +311,8 @@ def cross_cluster_dedup(uq_rows: list, freq_map: dict,
     from sentence_transformers import SentenceTransformer
     print("\nCross-cluster dedup: encoding representative questions...")
     st_model = SentenceTransformer(
-        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        device=f"cuda:{gpu_id}")
     reps = [r["representative_question"] for r in uq_rows]
     embs = st_model.encode(reps, batch_size=128, show_progress_bar=False,
                            convert_to_numpy=True, normalize_embeddings=True)
@@ -339,17 +358,17 @@ def main():
     ap.add_argument("--raw-file",     required=True)
     ap.add_argument("--crop",         default="Maize Makka")
     ap.add_argument("--api-provider", default="anthropic",
-                    choices=["anthropic", "local"])
+                    choices=["anthropic", "local", "remote"])
     ap.add_argument("--api-key",      default=None,
                     help="Anthropic API key (or set ANTHROPIC_API_KEY env var)")
     ap.add_argument("--claude-model", default="claude-haiku-4-5")
     # Local model args (only used when --api-provider local)
-    ap.add_argument("--model",      default="/home/kshitij/models/qwen2.5-7b-instruct")
+    ap.add_argument("--model",      default="google/gemma-4-26B-A4B-it")
     ap.add_argument("--gpu-id",     type=int, default=0)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--resume",     action="store_true",
                     help="Skip clusters already in checkpoint")
-    ap.add_argument("--dedup-thresh", type=float, default=0.92,
+    ap.add_argument("--dedup-thresh", type=float, default=0.85,
                     help="Cosine similarity threshold for cross-cluster dedup")
     ap.add_argument("--output-dir", default=None,
                     help="Directory to write outputs (default: same dir as --cluster-file)")
@@ -422,26 +441,41 @@ def main():
             print("  All clusters already in checkpoint — nothing to submit")
         judge_local = None
 
-    else:  # local Qwen 7B
+    else:  # remote API (gemma / local model via OpenAI-compatible endpoint)
         print(f"\nLoading RepairJudge on GPU {args.gpu_id}...")
         judge_local = RepairJudge(args.model,
                                   batch_size=args.batch_size,
                                   gpu_id=args.gpu_id)
-        print(f"\nProcessing {len(cluster_list)} clusters...\n{'='*60}")
-        for cid, grp in tqdm(cluster_list, desc="Clusters"):
-            cid_key   = str(int(cid))
-            questions = grp['question'].tolist()
-            label     = str(grp['label'].iloc[0]).strip()
-            if cid_key in checkpoint:
-                continue
+
+        todo = [(cid, grp) for cid, grp in cluster_list
+                if str(int(cid)) not in checkpoint]
+        print(f"\nProcessing {len(todo)} clusters "
+              f"({len(cluster_list)-len(todo)} already checkpointed)...\n{'='*60}")
+
+        # Pre-warm the SentenceTransformer model before threads start so all
+        # threads share the already-loaded model and don't race on lazy-init.
+        print("  Pre-loading sentence transformer for cross-batch merge...")
+        _embed(judge_local, ["warmup"])
+
+        def _process_cluster(cid_grp):
+            cid, grp   = cid_grp
+            cid_key    = str(int(cid))
+            questions  = grp['question'].tolist()
+            label      = str(grp['label'].iloc[0]).strip()
             if len(questions) == 1:
                 groups = [{"group_id": 1, "answer_label": label, "indices": [0]}]
             else:
                 groups = find_unique_questions_local(
                     judge_local, questions, label, args.crop)
-            checkpoint[cid_key] = groups
-            with open(ckpt_file, 'w') as f:
-                json.dump(checkpoint, f)
+            with _ckpt_lock:
+                checkpoint[cid_key] = groups
+                with open(ckpt_file, 'w') as f:
+                    json.dump(checkpoint, f)
+
+        with ThreadPoolExecutor(max_workers=CLUSTER_WORKERS) as executor:
+            futs = {executor.submit(_process_cluster, item): item for item in todo}
+            for fut in tqdm(as_completed(futs), total=len(futs), desc="Clusters"):
+                fut.result()  # re-raise any exception
 
     # ── Build uq_rows from checkpoint ─────────────────────────────────────────
     print("\nBuilding output rows from checkpoint...")
@@ -491,7 +525,8 @@ def main():
 
     # ── Cross-cluster dedup ───────────────────────────────────────────────────
     uq_rows = cross_cluster_dedup(uq_rows, freq_map,
-                                   sim_thresh=args.dedup_thresh)
+                                   sim_thresh=args.dedup_thresh,
+                                   gpu_id=args.gpu_id)
 
     # ── Rebuild q2uq_id after dedup (some unique_q_ids may have been absorbed) ─
     # The mapping is still valid since we kept the surviving unique_q_ids.

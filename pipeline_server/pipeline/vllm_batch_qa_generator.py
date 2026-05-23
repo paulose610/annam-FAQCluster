@@ -24,6 +24,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -304,118 +305,125 @@ def parse_text_response(text: str):
 # Core Generation Logic (importable)
 # ══════════════════════════════════════════════════════════════════════════════
 
+_API_URL   = "http://100.100.108.44:8013/v1/chat/completions"
+_API_MODEL = "google/gemma-4-26B-A4B-it"
+
+
+def _call_api(session, messages: list, max_tokens: int = 4000) -> str:
+    payload = {
+        "model": _API_MODEL,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "temperature": 0.0,
+    }
+    resp = session.post(_API_URL, json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
+
+_WORKERS = 16  # concurrent API calls; vLLM queues extras automatically
+
+
+def _process_row(args):
+    """Process a single row; returns (index, question, category, answer)."""
+    import requests as _requests
+    i, row, system_prompt, crop, prefix = args
+    question = row.get('QueryText', row.get('representative_question', 'N/A'))
+    freq = row.get('count', row.get('raw_frequency', 1))
+    user_msg = prefix + f"""
+Generate a {crop} FAQ entry based on:
+- Representative Question: {question}
+- Freq: {freq}
+"""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_msg},
+    ]
+    session = _requests.Session()
+    session.headers.update({"Content-Type": "application/json"})
+    try:
+        text = _call_api(session, messages)
+    except Exception as exc:
+        print(f"  [row {i}] API error: {exc}")
+        text = ""
+    parsed, _ = parse_text_response(text)
+    if parsed and parsed.get("category") != "PARSE_ERROR":
+        return i, parsed.get("question", "").strip(), parsed.get("category", "").strip(), parsed.get("answer", "").strip()
+    return i, "", "PARSE_ERROR", (parsed.get("answer", text) if parsed else text)
+
+
 def run_qa_generation(
     input_csv: str,
     output_csv: str,
     crop: str,
-    model: str = "Qwen/Qwen2.5-7B-Instruct",
+    model: str = _API_MODEL,
     tp: int = 1,
     gpu_util: float = 0.90,
     max_rows: int = None,
+    workers: int = _WORKERS,
 ) -> str:
     """
-    Run vLLM batch Q&A generation on a unique_questions_freq.csv file.
+    Run Q&A generation on a unique_questions_freq.csv file via remote API.
 
     Args:
         input_csv:  Path to the input CSV (must have 'representative_question' column).
         output_csv: Path to write the output CSV with generated Q&A columns.
         crop:       Crop name used in the system prompt.
-        model:      Local model path or HuggingFace model ID.
-        tp:         Tensor parallel size (number of GPUs for this job).
-        gpu_util:   GPU memory utilisation fraction (0.0–1.0).
+        model:      Ignored — uses remote API at _API_URL.
+        tp:         Ignored (legacy vLLM parameter).
+        gpu_util:   Ignored (legacy vLLM parameter).
         max_rows:   If set, only process the first N rows.
+        workers:    Number of concurrent API threads (default: 16).
 
     Returns:
         The output CSV path.
     """
-    # Lazy import — vllm is heavy and optional for Stages 1–6
-    from vllm import LLM, SamplingParams
-
     df = pd.read_csv(input_csv)
     if max_rows:
         df = df.head(max_rows)
 
-    print(f"🚀 Initializing vLLM Batch Generator for {crop} ({len(df)} rows)")
-    print(f"   Model: {model} | TP: {tp} | GPU Util: {gpu_util}")
-
-    # Launch vLLM engine
-    llm = LLM(
-        model=model,
-        tensor_parallel_size=tp,
-        gpu_memory_utilization=gpu_util,
-        trust_remote_code=True,
-        enforce_eager=True,  # Helpful for stability on large batches
-    )
-
-    sampling_params = SamplingParams(
-        temperature=0.0,
-        max_tokens=4000,
-        top_p=0.95,
-    )
+    n = len(df)
+    print(f"Initializing Remote API Q&A Generator for {crop} ({n} rows)")
+    print(f"   API: {_API_URL} | Model: {_API_MODEL} | Workers: {workers}")
 
     system_prompt = get_system_prompt(crop)
-
-    # Mandatory English override at start of user message —
-    # handles cases where models ignore system prompt for regional inputs
     prefix = "MANDATORY: Translate and generate this FAQ entry EXCLUSIVELY in English.\n\n"
 
-    # Build batch prompts using Chat Templating for Instruct models
-    prompts_for_vllm = []
-    for _, row in df.iterrows():
-        question = row.get('QueryText', row.get('representative_question', 'N/A'))
-        freq = row.get('count', row.get('raw_frequency', 1))
-
-        user_msg = prefix + f"""
-Generate a {crop} FAQ entry based on:
-- Representative Question: {question}
-- Freq: {freq}
-"""
-        prompts_for_vllm.append([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_msg},
-        ])
-
-    print(f"\n⏳ Starting generation over {len(prompts_for_vllm)} prompts...")
+    print(f"\nStarting generation over {n} prompts...")
     start_time = time.time()
 
-    # Apply chat template and generate
-    tokenizer = llm.get_tokenizer()
-    raw_prompts = [
-        tokenizer.apply_chat_template(msg, tokenize=False, add_generation_prompt=True)
-        for msg in prompts_for_vllm
-    ]
+    rows_list = [(i, row) for i, (_, row) in enumerate(df.iterrows())]
+    tasks = [(i, row, system_prompt, crop, prefix) for i, row in rows_list]
 
-    outputs = llm.generate(raw_prompts, sampling_params=sampling_params)
+    results = [None] * n
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process_row, t): t[0] for t in tasks}
+        for future in as_completed(futures):
+            idx, q, cat, ans = future.result()
+            results[idx] = (q, cat, ans)
+            completed += 1
+            if completed % 10 == 0:
+                elapsed = time.time() - start_time
+                print(f"  Progress: {completed}/{n} rows ({elapsed:.1f}s)")
 
     elapsed = time.time() - start_time
-    rqs = len(prompts_for_vllm) / elapsed if elapsed > 0 else 0
-    print(f"✅ Generation complete! Time: {elapsed:.1f}s ({rqs:.2f} rq/s)")
+    rqs = n / elapsed if elapsed > 0 else 0
+    print(f"Generation complete! Time: {elapsed:.1f}s ({rqs:.2f} rq/s)")
 
-    # Parse results
-    gen_qs, gen_cats, gen_ans = [], [], []
-    for out in outputs:
-        text = out.outputs[0].text
-        parsed, _ = parse_text_response(text)
-        if parsed and parsed.get("category") != "PARSE_ERROR":
-            gen_qs.append(parsed.get("question", "").strip())
-            gen_cats.append(parsed.get("category", "").strip())
-            gen_ans.append(parsed.get("answer", "").strip())
-        else:
-            gen_qs.append("")
-            gen_cats.append("PARSE_ERROR")
-            gen_ans.append(parsed.get("answer", text) if parsed else text)
+    gen_qs   = [r[0] for r in results]
+    gen_cats = [r[1] for r in results]
+    gen_ans  = [r[2] for r in results]
 
-    # Save back to DataFrame
     output_df = df.copy()
     output_df["Generated_Question"] = gen_qs
     output_df["Generated_Category"] = gen_cats
     output_df["Generated_Answer"] = gen_ans
 
     output_df.to_csv(output_csv, index=False, encoding='utf-8')
-    print(f"✅ Saved results to {output_csv}")
+    print(f"Saved results to {output_csv}")
 
-    # Clean up vLLM resources to free GPU memory
-    del llm
     try:
         import torch
         import gc

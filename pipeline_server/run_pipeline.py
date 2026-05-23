@@ -11,7 +11,7 @@ Usage (from the project root):
         --raw-file data/raw/punjab_maize_raw.csv \\
         --crop "Maize Makka" \\
         --api-key sk-ant-...          # Anthropic Claude for Stage 4
-        [--model /path/to/qwen]      # local Qwen 7B (Stages 2-3, 7)
+        [--model google/gemma-4-26B-A4B-it]  # hosted LLM (Stages 2-3, 7)
         [--grid-mode medium] \\
         [--output-dir outputs/repair]
 
@@ -41,8 +41,13 @@ import textwrap
 from pathlib import Path
 from datetime import datetime
 
-SCRIPT_DIR   = Path(__file__).resolve().parent          # kcc_faq/
-PIPELINE_DIR = SCRIPT_DIR / 'pipeline'                 # kcc_faq/pipeline/
+SCRIPT_DIR   = Path(__file__).resolve().parent       # kcc_faq/
+PIPELINE_DIR = SCRIPT_DIR / 'pipeline'               # kcc_faq/pipeline/
+
+try:
+    import _job_ctl as _ctl
+except ImportError:
+    _ctl = None
 # Corpus config is local to this folder — no external project dependency
 DEFAULT_CORPUS = SCRIPT_DIR / 'config' / 'irrelevant_corpus.yaml'
 sys.path.insert(0, str(SCRIPT_DIR))  # so `from pipeline.X import Y` works
@@ -91,7 +96,10 @@ def run_phase1(args, out_dir: Path):
         print(f"  Sampled: {args.max_queries}")
 
     print("\n  Loading sentence transformer...")
-    model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+    model = SentenceTransformer(
+        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        device=f"cuda:{args.gpu_id}",
+    )
     stop_words = load_stopwords()
     configs = generate_param_grid(mode=args.grid_mode)
 
@@ -145,7 +153,10 @@ def run_repair(args, out_dir: Path, candidates: list, best_cfg: str):
 
     # Step A: diverse reps
     print(f"\n  [A] Loading sentence transformer for embeddings...")
-    st_model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
+    st_model = SentenceTransformer(
+        'sentence-transformers/paraphrase-multilingual-mpnet-base-v2',
+        device=f"cuda:{args.gpu_id}",
+    )
     texts    = result.df['query_text'].tolist()
     import numpy as np
     all_embs = st_model.encode(
@@ -209,14 +220,28 @@ def run_unique_questions(args, out_dir: Path):
         cmd += ['--api-provider', 'anthropic', '--api-key', args.api_key]
     else:
         cmd += [
-            '--api-provider', 'local',
+            '--api-provider', 'remote',
             '--model',        args.model,
             '--gpu-id',       str(args.gpu_id),
             '--batch-size',   str(args.batch_size),
         ]
 
+    # Resume from checkpoint if partial work already exists (avoids redoing API calls)
+    if (out_dir / 'unique_questions_checkpoint.json').exists():
+        cmd += ['--resume']
+        print(f"  [resume] unique_questions_checkpoint.json found — resuming from checkpoint")
+
     print(f"  Running: {' '.join(cmd[:6])} ...")
-    result = subprocess.run(cmd, check=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    if _ctl:
+        _ctl.register_proc(proc)
+    for line in proc.stdout:
+        print(line, end="", flush=True)
+    proc.wait()
+    if _ctl:
+        _ctl.deregister_proc()
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
     print(f"\n  ✓ Unique question extraction complete")
 
 
@@ -233,11 +258,21 @@ def run_dedup(out_dir: Path):
         '--output', str(freq_csv),
         '--drop-rank',
     ]
-    subprocess.run(cmd, check=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if _ctl:
+        _ctl.register_proc(proc)
+    stdout, stderr = proc.communicate()
+    if _ctl:
+        _ctl.deregister_proc()
+    if stdout:
+        print(stdout, end="")
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, cmd, stdout, stderr)
     print(f"\n  ✓ Dedup complete — final FAQ: {freq_csv}")
 
 
-def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85):
+def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85,
+                      crop: str | None = None, crops_yaml: str | None = None):
     """Stage 6: Remove irrelevant representative questions via corpus filter."""
     banner("Stage 6/7 — Irrelevant Corpus Filtering")
     freq_csv = out_dir / 'unique_questions_freq.csv'
@@ -247,13 +282,19 @@ def run_corpus_filter(out_dir: Path, corpus_file: str, fuzz_thresh: int = 85):
     print(f"  Corpus   : {corpus_file}")
     print(f"  Fuzz thr : {fuzz_thresh}")
 
-    from pipeline.filter_faq_corpus import filter_faq, load_corpus
+    from pipeline.filter_faq_corpus import filter_faq, load_cross_crop_keywords
+    extra_keywords = None
+    if crop and crops_yaml and Path(crops_yaml).exists():
+        print(f"  Crops    : {crops_yaml}  (target: {crop})")
+        extra_keywords = load_cross_crop_keywords(crops_yaml, crop)
+
     kept_df, removed_df = filter_faq(
-        input_path  = freq_csv,
-        corpus_path = corpus_file,
-        output_path = freq_csv,
-        fuzz_thresh = fuzz_thresh,
-        dry_run     = False,
+        input_path     = freq_csv,
+        corpus_path    = corpus_file,
+        output_path    = freq_csv,
+        fuzz_thresh    = fuzz_thresh,
+        dry_run        = False,
+        extra_keywords = extra_keywords,
     )
     print(f"\n  ✓ Corpus filter complete — {len(kept_df)} rows kept, "
           f"{len(removed_df)} rows removed")
@@ -294,7 +335,7 @@ def load_candidates(out_dir: Path) -> list:
         return pickle.load(f)
 
 
-def load_best_cfg(out_dir: Path, candidates: list) -> str:
+def load_best_cfg(out_dir: Path, candidates=None) -> str:
     """Determine best config from Phase 2 CSV or Phase 1 metric."""
     import pandas as pd
     p2_csv = out_dir / 'phase2_scores.csv'
@@ -303,7 +344,9 @@ def load_best_cfg(out_dir: Path, candidates: list) -> str:
         cfg = p2.sort_values('composite_score', ascending=False).iloc[0]['config']
         print(f"  Best config (Phase 2): {cfg}")
         return cfg
-    # Fallback: lowest coverage_efficiency (tightest)
+    # Fallback: lowest coverage_efficiency (tightest) — load candidates lazily if not already in memory
+    if candidates is None:
+        candidates = load_candidates(out_dir)
     cfg = str(min(candidates, key=lambda r: r.metrics.get('coverage_efficiency', 1)).config)
     print(f"  Best config (Phase 1 fallback): {cfg}")
     return cfg
@@ -330,8 +373,8 @@ def parse_args():
     # ── Model ─────────────────────────────────────────────────────────────────
     mdl = parser.add_argument_group('Model / API')
     mdl.add_argument('--model',
-                     default='/home/kshitij/models/qwen2.5-7b-instruct',
-                     help='Local Qwen 7B model path for LLM evaluation and repair')
+                     default='google/gemma-4-26B-A4B-it',
+                     help='Model name/path for LLM evaluation and repair')
     mdl.add_argument('--api-key', default=None,
                      help='Anthropic API key for Claude Haiku unique-question stage. '
                           'If omitted, local Qwen is used instead.')
@@ -360,6 +403,11 @@ def parse_args():
                       default=str(DEFAULT_CORPUS),
                       help=('Path to irrelevant_corpus.yaml '
                             f'(default: {DEFAULT_CORPUS})'))
+    _default_crops = SCRIPT_DIR / 'crops.yaml'
+    ctrl.add_argument('--crops-file',
+                      default=str(_default_crops) if _default_crops.exists() else None,
+                      help=('Path to crops.yaml for cross-crop keyword exclusion '
+                            f'(default: {_default_crops} if present, else disabled)'))
     ctrl.add_argument('--fuzz-threshold', type=int, default=100,
                       help='Fuzzy match threshold for corpus filter 0–100 (default: 100 - disabled)')
 
@@ -396,7 +444,8 @@ def main():
     out_base = Path(args.output_dir)
     if not out_base.is_absolute():
         out_base = project_root / out_base
-    out_dir = out_base / slug(args.crop)
+    state_folder = Path(args.raw_file).stem  # e.g. "maharashtra_norm"
+    out_dir = out_base / state_folder / slug(args.crop)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     start_time = datetime.now()
@@ -404,56 +453,92 @@ def main():
     print(f"  Output dir : {out_dir}")
     print(f"  Raw file   : {args.raw_file}")
     print(f"  LLM model  : {args.model}")
-    print(f"  API        : {'Anthropic (Claude Haiku)' if args.api_key else 'Local Qwen 7B'}")
+    print(f"  API        : {'Anthropic (Claude Haiku)' if args.api_key else 'Remote vLLM'}")
     print(f"  Grid mode  : {args.grid_mode}")
     print(f"  Started    : {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
 
+    candidates = None  # loaded lazily — avoids heavy imports when phases 2+3 are already done
+
     # ── Stage 1: Phase 1 ─────────────────────────────────────────────────────
-    if args.skip_phase1:
-        print("\n[--skip-phase1] Loading existing Phase 1 results...")
-        candidates = load_candidates(out_dir)
+    if args.skip_phase1 or (out_dir / 'phase1_results.pkl').exists():
+        if not args.skip_phase1:
+            print(f"\n[auto-skip] phase1_results.pkl exists — Phase 1 already done")
+        else:
+            print("\n[--skip-phase1] Phase 1 skipped by flag")
+        # candidates loaded lazily below only if phase 2 or 3 actually runs
     else:
         candidates = run_phase1(args, out_dir)
 
     # ── Stage 2: Phase 2 ─────────────────────────────────────────────────────
-    if args.skip_phase2:
-        print("\n[--skip-phase2] Detecting best config...")
-        best_cfg = load_best_cfg(out_dir, candidates)
+    if args.skip_phase2 or (out_dir / 'phase2_scores.csv').exists():
+        if not args.skip_phase2:
+            print(f"\n[auto-skip] phase2_scores.csv exists — skipping Phase 2 LLM evaluation")
+        else:
+            print("\n[--skip-phase2] Detecting best config...")
+        best_cfg = load_best_cfg(out_dir, candidates)  # candidates=None is fine when CSV exists
     else:
+        if candidates is None:
+            candidates = load_candidates(out_dir)
         best_cfg = run_phase2(args, out_dir, candidates)
 
     # ── Stage 3: Repair ───────────────────────────────────────────────────────
-    if args.skip_repair:
-        print("\n[--skip-repair] Skipping cluster repair (using existing cluster_questions.csv)")
+    if args.skip_repair or (out_dir / 'cluster_questions.csv').exists():
+        if not args.skip_repair:
+            print(f"\n[auto-skip] cluster_questions.csv exists — skipping cluster repair")
+        else:
+            print("\n[--skip-repair] Skipping cluster repair (using existing cluster_questions.csv)")
     else:
+        if candidates is None:
+            candidates = load_candidates(out_dir)
         run_repair(args, out_dir, candidates, best_cfg)
 
     # ── Stage 4: Unique questions ──────────────────────────────────────────────
-    if args.skip_unique_q:
-        print("\n[--skip-unique-q] Skipping unique question extraction")
+    if args.skip_unique_q or (out_dir / 'unique_question_mapping.csv').exists():
+        if not args.skip_unique_q:
+            print(f"\n[auto-skip] unique_question_mapping.csv exists — skipping unique question extraction")
+        else:
+            print("\n[--skip-unique-q] Skipping unique question extraction")
     else:
         run_unique_questions(args, out_dir)
 
     # ── Stage 5: Dedup ────────────────────────────────────────────────────────
-    run_dedup(out_dir)
+    # Skip if a downstream stage already ran — corpus filter and Q&A gen both follow dedup,
+    # so their presence proves dedup was already completed.
+    if (out_dir / 'corpus_filtered_out.csv').exists() or \
+       (out_dir / 'unique_questions_freq_qa.csv').exists():
+        print(f"\n[auto-skip] downstream output exists — dedup (Stage 5) already ran")
+    else:
+        run_dedup(out_dir)
 
     # ── Stage 6: Corpus filter ────────────────────────────────────────────────
-    if args.skip_corpus_filter:
-        print("\n[--skip-corpus-filter] Skipping irrelevant corpus filtering")
+    if args.skip_corpus_filter or (out_dir / 'corpus_filtered_out.csv').exists():
+        if not args.skip_corpus_filter:
+            print(f"\n[auto-skip] corpus_filtered_out.csv exists — skipping corpus filter")
+        else:
+            print("\n[--skip-corpus-filter] Skipping irrelevant corpus filtering")
     else:
         if not Path(args.corpus_file).exists():
             print(f"\n  WARNING: corpus file not found: {args.corpus_file}")
             print("  Skipping corpus filter (use --corpus-file to specify a valid path)")
         else:
-            run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold)
+            run_corpus_filter(out_dir, args.corpus_file, args.fuzz_threshold,
+                              crop=args.crop, crops_yaml=args.crops_file)
 
     # ── Stage 7: Q&A Generation ───────────────────────────────────────────────
-    if args.skip_qa_gen:
-        print("\n[--skip-qa-gen] Skipping Q&A generation")
+    if args.skip_qa_gen or (out_dir / 'unique_questions_freq_qa.csv').exists():
+        if not args.skip_qa_gen:
+            print(f"\n[auto-skip] unique_questions_freq_qa.csv exists — skipping Q&A generation")
+        else:
+            print("\n[--skip-qa-gen] Skipping Q&A generation")
     else:
         run_qa_gen(args, out_dir)
 
     # ── Done ──────────────────────────────────────────────────────────────────
+    import json as _json
+    _meta_path = out_dir / "meta.json"
+    if not _meta_path.exists():
+        _meta_path.write_text(_json.dumps({"download": False, "audit": False}))
+
     elapsed = datetime.now() - start_time
     banner("Pipeline Complete!")
     faq = out_dir / 'unique_questions_freq.csv'
