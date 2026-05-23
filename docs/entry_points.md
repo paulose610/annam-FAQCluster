@@ -1,6 +1,6 @@
 # Entry Points
 
-These four scripts are the top-level CLI interfaces for the pipeline system. The backend calls them (directly or as subprocesses); users can also invoke them from the terminal.
+These four scripts are the top-level CLI interfaces for the pipeline system. They live inside `pipeline_server/`. The pipeline server calls them (directly or as subprocesses); users can also invoke them from the terminal from within the `pipeline_server/` directory.
 
 ---
 
@@ -9,6 +9,7 @@ These four scripts are the top-level CLI interfaces for the pipeline system. The
 Runs the complete workflow: pre-pipeline → main pipeline (per crop) → post-pipeline.
 
 ```bash
+cd pipeline_server
 python run_full.py \
   --raw-file app-data/cleaned_data.csv \
   --state Karnataka \
@@ -54,7 +55,7 @@ python run_full.py \
    run_post_pipeline() on outputs/<state>/
 ```
 
-Registers each subprocess with `_job_ctl` so they can be cancelled via the backend's stop endpoint.
+Registers each subprocess with `_job_ctl` so they can be cancelled via the server's stop endpoint.
 
 ---
 
@@ -63,6 +64,7 @@ Registers each subprocess with `_job_ctl` so they can be cancelled via the backe
 The core FAQ generation script. Runs all 7 stages for a single crop.
 
 ```bash
+cd pipeline_server
 python run_pipeline.py \
   --raw-file app-data/karnataka_norm.csv \
   --crop "Cotton" \
@@ -114,6 +116,7 @@ Each stage checks for its expected output file. Re-running the script will skip 
 Runs state filtering and crop normalization.
 
 ```bash
+cd pipeline_server
 python run_pre_pipeline.py \
   --input app-data/cleaned_data.csv \
   --state Karnataka \
@@ -143,7 +146,7 @@ Stage 2: crop_normalizer.run_crop_normalizer()
    → <output>  (e.g. app-data/karnataka_norm.csv)
 ```
 
-Both stages are called as direct Python function calls (not subprocesses). The backend `_run_pre_sync()` also imports and calls these functions directly.
+Both stages are called as direct Python function calls (not subprocesses). The pipeline server's `_run_pre_sync()` also imports and calls these functions directly.
 
 ---
 
@@ -152,6 +155,7 @@ Both stages are called as direct Python function calls (not subprocesses). The b
 Runs LLM deduplication and final CSV generation for all crops in a state output directory.
 
 ```bash
+cd pipeline_server
 python run_post_pipeline.py \
   --input outputs/repair/karnataka_norm \
   --crops Cotton Sugarcane
@@ -181,14 +185,14 @@ For each crop subfolder in --input/:
 ### Called From
 
 - CLI (directly)
-- `backend/routes/faq_cluster.py:_run_post_sync()` — called as `run_post_pipeline.run_post()` (direct import)
-- `run_full.py` — called at the end of a full workflow run
+- `pipeline_server.py:_run_post_sync()` (direct import: `run_post_pipeline.run_post()`)
+- `run_full.py` (at the end of a full workflow run)
 
 ---
 
 ## `_job_ctl.py` — Job Control
 
-Not a user-facing script; a utility module used by the backend and entry point scripts for process registration and cancellation.
+Not a user-facing script; a utility module used by the pipeline server and entry point scripts for process registration and cancellation.
 
 **Key functions**:
 
@@ -198,4 +202,4 @@ Not a user-facing script; a utility module used by the backend and entry point s
 | `check_cancel(job_id)` | Returns `True` if a stop was requested for this job |
 | `kill_job(job_id)` | Send `SIGTERM` to the registered process group for a job |
 
-The backend's `POST /jobs/{jobId}/stop` sets a cancellation flag, and the running script polls `check_cancel()` between stages (or between crop subprocesses in `run_full.py`). If cancelled, the subprocess is killed via `os.killpg(pgid, signal.SIGTERM)`.
+The pipeline server's `POST /jobs/{job_id}/stop` sets a cancellation flag, and the running script polls `check_cancel()` between stages (or between crop subprocesses in `run_full.py`). If cancelled, the subprocess is killed via `os.killpg(pgid, signal.SIGTERM)`.

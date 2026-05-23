@@ -1,13 +1,13 @@
-# Backend
+# Pipeline Server
 
-The backend is a **FastAPI** application that orchestrates all pipeline runs, manages files, and exposes a REST API consumed by the React frontend.
+The pipeline server is a **FastAPI** application that orchestrates all pipeline runs, manages files, and exposes the REST API consumed by the React frontend. All pipeline logic (pre, main, post) lives inside `pipeline_server/`.
 
-**Entry point**: `backend/main.py`
-**Default port**: `6100`
+**Entry point**: `pipeline_server/pipeline_server.py`
+**Default port**: `7000`
 
 ```bash
-cd backend
-uvicorn main:app --host 0.0.0.0 --port 6100
+cd pipeline_server
+uvicorn pipeline_server:app --host 0.0.0.0 --port 7000
 ```
 
 ---
@@ -15,85 +15,93 @@ uvicorn main:app --host 0.0.0.0 --port 6100
 ## File Structure
 
 ```
-backend/
-├── main.py            # App creation, router registration, root endpoints
-├── common.py          # Shared constants and path utilities
-├── jobs.py            # Job lifecycle management and async executor
-└── routes/
-    ├── faq_cluster.py     # /run/pre, /run/pipeline, /run/post, /run/full
-    ├── files.py           # /files/* — upload, download, rename, delete, tree
-    ├── pop_translation.py # /pop/*, /run/pop
-    └── jobs_router.py     # /jobs/*
+pipeline_server/
+├── pipeline_server.py     # FastAPI app — all routes in a single file
+├── _job_ctl.py            # Shared process registration and cancellation
+├── pipeline/              # Core clustering and LLM stages (1–7)
+├── pre_pipeline/          # State filter + crop normalization
+├── post_pipeline/         # LLM deduplication + final output
+├── run_pipeline.py        # Per-crop subprocess entry point
+├── run_pre_pipeline.py    # Pre-pipeline CLI entry point
+├── run_post_pipeline.py   # Post-pipeline CLI entry point
+├── run_full.py            # End-to-end orchestrator
+├── config/
+│   └── irrelevant_corpus.yaml
+├── crops.yaml
+└── Dockerfile
 ```
 
 ---
 
-## `main.py`
+## Route Summary
 
-Registers all routers and exposes two utility endpoints:
+### Health & App Utilities
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/` | GET | Health check — returns `{"status": "ok"}` |
-| `/app/tree` | GET | Combined FAQ file tree + POP data tree |
+| `/app/tree` | GET | Full FAQ file tree (outputs + app-data) |
+| `/app/next-state` | GET | Get next versioned state folder name |
+| `/app/state-table` | GET | Summary table of state/crop outputs |
+| `/app/output/{state}/{crop}` | GET | Download final output CSV for a state/crop |
 
----
+### Pipeline Runs
 
-## `common.py`
-
-Shared constants used across all routes:
-
-| Name | Default | Description |
+| Endpoint | Method | Description |
 |---|---|---|
-| `ROOT_DIR` | Project root | Absolute path to `FAQCluster/` |
-| `APP_DATA` | `FAQCluster/app-data/` | User upload/download directory |
-| `POP_WORK_DIR` | `POP_Work/` | POP translation working directory (overridable via env var) |
+| `/run/pre` | POST | State filter → crop normalize |
+| `/run/pipeline` | POST | Per-crop 7-stage pipeline (one subprocess per crop) |
+| `/run/post` | POST | LLM deduplication + final CSV |
+| `/run/full` | POST | Pre → pipeline per crop → post (end-to-end) |
 
-**`_resolve_safe(user_path, base)`** validates that a user-supplied path stays within `base`, preventing directory traversal attacks. All file routes use this before touching the filesystem.
+### File Management
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/files/tree` | GET | Filtered view of app-data and outputs |
+| `/files/download/{path}` | GET | Stream file as download |
+| `/files/upload` | POST | Upload single file |
+| `/files/upload-chunk` | POST | Chunked upload (for large files) |
+| `/files/rename/{path}` | POST | Rename / move file |
+| `/files/{path}` | DELETE | Delete file |
+| `/folders/{path}` | DELETE | Delete folder tree |
+| `/files/folders` | POST | Create directory |
+| `/files/upload-audited` | POST | Upload manually audited FAQ replacement |
+
+### Job Control
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/jobs` | GET | List all jobs (id, status, summary) |
+| `/jobs/{job_id}` | GET | Full job details including stdout/stderr |
+| `/jobs/{job_id}/stop` | POST | Set cancellation flag; subprocess exits on next poll |
+| `/jobs/{job_id}` | DELETE | Remove job from history |
 
 ---
 
-## `jobs.py` — Job Lifecycle
+## Request Models
 
-All pipeline runs execute as background jobs. Each job has:
+### `PreRequest`
 
-| Field | Values |
-|---|---|
-| `status` | `pending` → `running` → `done` / `failed` / `stopped` |
-| `stdout` | Captured print() output from the job |
-| `stderr` | Captured error output |
-| `job_id` | Integer — `1`=pre, `2`=pipeline, `3`=post, `4`=full, `5`=pop |
-
-**Key internals**:
-- `_JobStdout`: Overrides `sys.stdout` inside a job so all `print()` calls feed into the job log visible via `GET /jobs/{id}`.
-- `_run_job(fn)`: Wraps a sync function, sets status to `running`, captures output, updates status on completion or error.
-- `_submit(job_id, fn)`: Submits the job to a `ThreadPoolExecutor`, returns the job object immediately.
-
----
-
-## `routes/faq_cluster.py` — Pipeline Routes
-
-### Request models
-
-**`PreRequest`**
 ```
-state: str            # e.g. "Karnataka"
-crops: list[str]      # e.g. ["Cotton", "Sugarcane"]
-domains: list[str]    # QueryType filter values (optional)
-output: str           # Output CSV path (relative to app-data/)
+state: str              # e.g. "Karnataka"
+crops: list[str]        # e.g. ["Cotton", "Sugarcane"]
+domains: list[str]      # QueryType filter values (optional)
+output: str             # Output CSV path (relative to app-data/)
 keep_intermediate: bool
 ```
 
-**`PipelineRequest`**
+### `PipelineRequest`
+
 ```
-input: str            # Normalized CSV path
+input: str              # Normalized CSV path (relative to app-data/)
 crops: list[str]
 domains: list[str]
 output_dir: str
-model: str            # HuggingFace model ID or path
-api_key: str          # Claude/Anthropic API key (optional)
+model: str              # HuggingFace model ID or path
+api_key: str            # Anthropic API key (optional)
 batch_size: int
-grid_mode: str        # "quick" | "medium" | "full" | "exhaustive"
+grid_mode: str          # "quick" | "medium" | "full" | "exhaustive"
 skip_phase1: bool
 skip_phase2: bool
 skip_repair: bool
@@ -103,111 +111,82 @@ skip_filter: bool
 skip_qa: bool
 ```
 
-**`PostRequest`**
+### `PostRequest`
+
 ```
-input: str            # State-level output directory
-crops: list[str]      # Optional crop filter
+input: str              # State-level output directory
+crops: list[str]        # Optional crop filter
 skip_dedup: bool
 ```
 
-**`FullRequest`** — union of Pre + Pipeline + Post params.
+### `FullRequest`
 
-### Routes
+Union of Pre + Pipeline + Post parameters.
 
-| Route | Handler | Behaviour |
-|---|---|---|
-| `POST /run/pre` | `_run_pre_sync()` | State filter → crop normalize |
-| `POST /run/pipeline` | `_run_pipeline_sync()` | One subprocess per crop |
-| `POST /run/post` | `_run_post_sync()` | LLM deduplication |
-| `POST /run/full` | `_run_full_sync()` | Pre → pipeline per crop → post |
+---
 
-**`_run_pipeline_sync()`** details:
+## Job Lifecycle
+
+All pipeline runs execute as background jobs via `asyncio` + `ThreadPoolExecutor`. Each job has:
+
+| Field | Values |
+|---|---|
+| `job_id` | UUID string |
+| `job_type` | `"pre"` / `"pipeline"` / `"post"` / `"full"` |
+| `status` | `"pending"` → `"running"` → `"done"` / `"failed"` / `"stopped"` |
+| `stdout` | Captured print() output, streamed line-by-line |
+| `stderr` | Captured error output |
+
+**Key internals**:
+- `_run_job(job_id, fn)`: Wraps a sync function, captures `sys.stdout`, updates status on completion or error.
+- `_submit(fn, background, job_type)`: Submits job to `ThreadPoolExecutor`, returns `{job_id}` immediately.
+
+---
+
+## Pipeline Sync Functions
+
+### `_run_pipeline_sync(r: PipelineRequest)`
+
 - Auto-discovers crops from the CSV if none specified.
 - Spawns each crop as a separate subprocess via `subprocess.Popen` with a new process group so the whole group can be killed on cancellation.
 - Polls `_job_ctl.check_cancel()` between crops and during stdout streaming.
 - Streams subprocess stdout/stderr line-by-line into the job log.
 
-**`_run_full_sync()`** smart caching:
-- If a normalized CSV already exists for the same state and domains, re-uses it instead of re-running the pre-pipeline.
+### `_run_full_sync(r: FullRequest)`
+
+- Smart caching: if a normalized CSV already exists for the same state and domains, re-uses it instead of re-running the pre-pipeline.
 - When appending new crops, extends the existing normalized CSV rather than overwriting it.
+- Runs pre → pipeline (per crop) → post in sequence.
 
 ---
 
-## `routes/files.py` — File Management
+## File Management
 
-All paths are resolved relative to `APP_DATA` using `_resolve_safe()`.
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/files/tree` | GET | Returns `{all_csvs, crop_qa_files, final_csvs}` |
-| `/files/download/{path}` | GET | Stream file as download |
-| `/files/upload` | POST | Upload single file (chunked for > 800 KB) |
-| `/files/upload-chunk` | POST | Receive a chunk; assemble on last chunk |
-| `/files/rename/{path}` | POST | Rename/move file |
-| `/files/{path}` | DELETE | Delete file |
-| `/files/folders` | POST | Create directory |
-| `/files/upload-audited` | POST | Upload manually audited FAQ replacement |
-
-**Tree response shape**:
-```json
-{
-  "all_csvs": ["outputs/repair/karnataka_norm/cotton/cluster_questions.csv", ...],
-  "crop_qa_files": ["outputs/repair/karnataka_norm/cotton/unique_questions_freq_qa.csv", ...],
-  "final_csvs": ["app-data/final/karnataka/karnataka_cotton.csv", ...]
-}
-```
+All paths are validated against `APP_DATA` or `OUTPUTS_DIR` using `_resolve_safe()` / `_resolve_any_safe()` to prevent directory traversal.
 
 **Chunked upload flow**:
 1. Client splits file into ≤ 800 KB chunks.
-2. Each chunk POST to `/files/upload-chunk` with `chunk_index`, `total_chunks`, `upload_id` (UUID).
-3. Chunks stored under a temp path; on `chunk_index == total_chunks - 1`, reassembled and moved to destination.
+2. Each chunk POSTed to `/files/upload-chunk` with `chunk_index`, `total_chunks`, `upload_id` (UUID).
+3. Chunks stored temporarily; on the last chunk, reassembled and moved to destination.
+
+**`/files/tree` response shape**:
+```json
+{
+  "files": [...],
+  "directories": [...]
+}
+```
+
+**`/app/state-table` response**: lists all state/crop pairs found under `outputs/repair/`, with `meta.json` status for each.
 
 ---
 
-## `routes/pop_translation.py` — POP Routes
+## Cancellation
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/pop/states` | GET | List state folders in `POP_Work/Data/` |
-| `/pop/crops` | GET | List crop folders for a state |
-| `/pop/docs` | GET | List PDFs for a state/crop |
-| `/pop/data/tree` | GET | Recursive tree of `POP_Work/Data/` |
-| `/pop/output/tree` | GET | Recursive tree of `POP_Work/Workdir/` |
-| `/pop/state-table` | GET | Summary table of states and crop counts |
-| `/run/pop` | POST | Start POP translation job |
-| `/pop/upload` | POST | Upload POP PDF |
-| `/pop/upload-chunk` | POST | Chunked upload for large PDFs |
-| `/pop/download/{path}` | GET | Download file from `POP_Work/` |
-| `/pop/folders` | POST | Create folder |
-| `/pop/files/{path}` | DELETE | Delete file |
-| `/pop/folders/{path}` | DELETE | Delete folder tree |
-| `/pop/upload-audited` | POST | Upload reviewed/corrected translation |
-
-**`/run/pop` request body**:
-```
-source_pdf: str       # Path relative to POP_Work/
-workdir: str          # Output workdir path
-doc_name: str         # Document name prefix
-prompt_file: str      # Prompt template path
-start_page: int
-end_page: int
-concurrency: int      # Parallel Gemini API calls
-```
-
-The route launches `POP-Translation/scripts/run_pop_to_docx.py` as a subprocess and captures output into job `5`.
-
----
-
-## `routes/jobs_router.py` — Job Control
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/jobs` | GET | List all jobs (id, status, summary) |
-| `/jobs/{jobId}` | GET | Full job details including stdout/stderr |
-| `/jobs/{jobId}` | DELETE | Remove job from history |
-| `/jobs/{jobId}/stop` | POST | Set cancellation flag; running subprocess will exit on next poll |
-
-Cancellation works via `_job_ctl`: the running `_run_pipeline_sync()` checks `check_cancel()` between crop subprocesses, and the subprocess itself receives `SIGTERM` via `os.killpg`.
+Cancellation works via `_job_ctl`:
+- `POST /jobs/{job_id}/stop` sets a cancellation flag.
+- `_run_pipeline_sync()` checks `_job_ctl.check_cancel()` between crop subprocesses.
+- The running subprocess receives `SIGTERM` via `os.killpg(pgid, signal.SIGTERM)`.
 
 ---
 
@@ -215,5 +194,5 @@ Cancellation works via `_job_ctl`: the running `_run_pipeline_sync()` checks `ch
 
 | Variable | Default | Description |
 |---|---|---|
-| `POP_WORK_DIR` | `<root>/POP_Work/` | Override POP working directory |
-| `APP_DATA_DIR` | `<root>/app-data/` | Override user data directory |
+| `APP_DATA_DIR` | `<pipeline_server>/app-data/` | User upload/download directory |
+| `CUDA_VISIBLE_DEVICES` | `0` | GPU index |

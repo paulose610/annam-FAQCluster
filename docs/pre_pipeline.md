@@ -4,8 +4,8 @@ The pre-pipeline prepares raw KCC CSV data for the main pipeline by:
 1. Filtering rows to a specific state (and optionally domain/query-type).
 2. Normalizing crop name variants to canonical names.
 
-**Location**: `pre_pipeline/`
-**Entry point**: `run_pre_pipeline.py` (see [Entry Points](entry_points.md))
+**Location**: `pipeline_server/pre_pipeline/`
+**Entry point**: `pipeline_server/run_pre_pipeline.py` (see [Entry Points](entry_points.md))
 
 ---
 
@@ -34,6 +34,7 @@ Filters the raw CSV to rows matching a target state, with an optional domain fil
 
 **CLI usage**:
 ```bash
+# run from pipeline_server/
 python pre_pipeline/get_state_crop_rows.py \
   --input app-data/cleaned_data.csv \
   --state "Karnataka" \
@@ -62,6 +63,7 @@ Maps raw crop name variants to canonical names and removes unmapped rows.
 
 **CLI usage**:
 ```bash
+# run from pipeline_server/
 python pre_pipeline/crop_normalizer.py \
   --input app-data/karnataka_filtered.csv \
   --crops Cotton Sugarcane Paddy \
@@ -161,6 +163,6 @@ python pre_pipeline/summary.py --input app-data/karnataka_norm.csv
 
 ## Called From
 
-- `run_pre_pipeline.py` (CLI entry point)
-- `backend/routes/faq_cluster.py:_run_pre_sync()` (direct function import, not subprocess)
-- `backend/routes/faq_cluster.py:_run_full_sync()` (as part of end-to-end run)
+- `pipeline_server/run_pre_pipeline.py` (CLI entry point)
+- `pipeline_server/pipeline_server.py:_run_pre_sync()` (direct function import, not subprocess)
+- `pipeline_server/pipeline_server.py:_run_full_sync()` (as part of end-to-end run)

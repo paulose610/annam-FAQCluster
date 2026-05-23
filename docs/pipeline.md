@@ -2,8 +2,8 @@
 
 The core pipeline transforms a normalized crop CSV into a final FAQ dataset with Q&A pairs. It runs once per crop, is **resume-safe** (each stage checks for existing output before running), and is invoked by `run_pipeline.py`.
 
-**Location**: `pipeline/`
-**Entry point**: `run_pipeline.py` (see [Entry Points](entry_points.md))
+**Location**: `pipeline_server/pipeline/`
+**Entry point**: `pipeline_server/run_pipeline.py` (see [Entry Points](entry_points.md))
 
 ---
 
@@ -182,8 +182,8 @@ market_price:
 Every stage checks for its expected output file before running. To force a stage to re-run, delete its output file and re-invoke `run_pipeline.py`. Use `--skip-*` flags to explicitly skip individual stages.
 
 ```bash
-# Skip all stages except Q&A generation
-python run_pipeline.py --raw-file data.csv --crop Cotton \
+# Skip all stages except Q&A generation (run from pipeline_server/)
+python run_pipeline.py --raw-file app-data/data.csv --crop Cotton \
   --skip-phase1 --skip-phase2 --skip-repair --skip-unique \
   --skip-dedup --skip-filter
 ```

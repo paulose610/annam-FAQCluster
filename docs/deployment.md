@@ -1,6 +1,6 @@
 # Deployment
 
-FAQCluster is deployed as two Docker containers orchestrated by Docker Compose.
+FAQCluster is deployed as two Docker containers orchestrated by Docker Compose, with a planned third container for POP-Translation running on a separate VM.
 
 ---
 
@@ -8,10 +8,11 @@ FAQCluster is deployed as two Docker containers orchestrated by Docker Compose.
 
 | Image | Role | Exposed port |
 |---|---|---|
-| `vicharanashala/faqcluster-webapp` | FastAPI API + React UI + POP-Translation | `8030` (public) |
-| `vicharanashala/faqcluster-pipeline` | ML pipeline HTTP service | `7000` (internal only) |
+| `vicharanashala/faqcluster-pipeline` | FastAPI pipeline server + ML models | `7000` (host network) |
+| `vicharanashala/faqcluster-frontend` | React UI served by nginx | `8030` (public) |
+| POP server *(planned)* | POP-Translation FastAPI server | `8000` (separate VM) |
 
-Port `7000` is **never opened on the host machine** — it is only reachable between the two containers on Docker's internal network. The only port you need to open in the VM's firewall is `8030`.
+The pipeline container uses `network_mode: host`, so port 7000 is accessible directly on the host. The frontend reaches the pipeline via the host's Tailscale IP. The only port that needs to be opened in the VM firewall for end users is `8030`.
 
 ---
 
@@ -36,6 +37,14 @@ sudo systemctl restart docker
 ---
 
 ## Deploying
+
+Before deploying, set the Tailscale IPs in `docker-compose.yml`:
+
+```yaml
+environment:
+  - FAQ_API_URL=http://<pipeline-tailscale-ip>:7000
+  - POP_API_URL=http://<pop-server-tailscale-ip>:8000
+```
 
 Copy `docker-compose.yml` to the production VM (no source code needed):
 
@@ -62,48 +71,45 @@ docker compose pull
 docker compose up -d --force-recreate
 ```
 
-Data volumes (`app-data`, `outputs`, `pop-work`) persist across updates automatically.
+Data volumes (`app-data`, `outputs`) persist across updates automatically.
 
 ---
 
 ## Environment Variables
 
-All env vars are set in `docker-compose.yml`. You can override them at runtime:
+Set in `docker-compose.yml`:
 
-```bash
-PIPELINE_API_URL=http://pipeline:7000 docker compose up
-```
-
-| Variable | Default | Description |
+| Variable | Service | Description |
 |---|---|---|
-| `PIPELINE_API_URL` | `http://pipeline:7000` | URL the webapp uses to reach the pipeline container |
-| `POP_WORK_DIR` | `/app/POP_Work` | POP translation working directory inside the webapp container |
-| `CUDA_VISIBLE_DEVICES` | `0` | GPU index for the pipeline container |
+| `FAQ_API_URL` | `frontend` | Tailscale URL of the pipeline container (e.g. `http://100.x.x.x:7000`) |
+| `POP_API_URL` | `frontend` | Tailscale URL of the POP server (e.g. `http://100.x.x.x:8000`) |
+| `CUDA_VISIBLE_DEVICES` | `pipeline` | GPU index (default: `0`) |
+
+The frontend reads `FAQ_API_URL` and `POP_API_URL` at nginx startup and injects them into the served HTML as `window.__FAQ_API_URL__` and `window.__POP_API_URL__`.
 
 ---
 
 ## Changing the public port
 
-If port `8030` is taken on the VM, change the `ports` mapping in `docker-compose.yml`:
+If port `8030` is taken, change the `ports` mapping in `docker-compose.yml`:
 
 ```yaml
 ports:
-  - "9090:8030"   # expose on VM port 9090 instead
+  - "9090:80"   # expose on VM port 9090 instead
 ```
 
-The internal port `8030` never changes — only the host-side binding does.
+The internal nginx port (`80`) never changes — only the host-side binding does.
 
 ---
 
 ## Persistent Data
 
-Three named Docker volumes store data across container restarts and image updates:
+Two named Docker volumes store data across container restarts and image updates:
 
-| Volume | Mounted at | Contents |
+| Volume | Mounted at (pipeline container) | Contents |
 |---|---|---|
 | `app-data` | `/app/app-data` | Uploaded CSVs, normalised data |
 | `outputs` | `/app/outputs` | Pipeline results, FAQ CSVs |
-| `pop-work` | `/app/POP_Work` | POP PDF uploads and translation outputs |
 
 To back up data:
 ```bash
@@ -121,25 +127,23 @@ Two workflows in `.github/workflows/` automatically build and push images on eve
 
 | Workflow | Triggers on changes to | Image pushed |
 |---|---|---|
-| `build-webapp.yml` | `backend/`, `frontend/`, `POP-Translation/`, `pre_pipeline/`, `post_pipeline/`, `Dockerfile.webapp` | `vicharanashala/faqcluster-webapp` |
-| `build-pipeline.yml` | `pipeline/`, `run_pipeline.py`, `pipeline_server.py`, `Dockerfile.pipeline` | `vicharanashala/faqcluster-pipeline` |
+| `build-pipeline.yml` | `pipeline_server/**` | `vicharanashala/faqcluster-pipeline` |
+| `build-frontend.yml` | `frontend/**` | `vicharanashala/faqcluster-frontend` |
 
 ### GitHub Secrets required
-
-Add these two secrets to the repository (`Settings → Secrets and variables → Actions`):
 
 | Secret | Value |
 |---|---|
 | `DOCKERHUB_USERNAME` | DockerHub username for the Vicharana Shala organisation |
 | `DOCKERHUB_TOKEN` | DockerHub access token (generate at hub.docker.com → Account Settings → Security) |
 
-Once the secrets are set, any push to `main` that touches the relevant files will automatically build and push the updated image. The production VM just needs `docker compose pull && docker compose up -d` to pick up the new image.
+Once the secrets are set, any push to `main` touching the relevant paths will automatically build and push the updated image. The production VM just needs `docker compose pull && docker compose up -d` to pick up the new image.
 
 ---
 
 ## Running without GPU
 
-If the production VM has no GPU, remove the `deploy.resources` block from `docker-compose.yml`:
+Remove the `deploy.resources` block from the `pipeline` service in `docker-compose.yml`:
 
 ```yaml
   pipeline:
@@ -150,6 +154,7 @@ If the production VM has no GPU, remove the `deploy.resources` block from `docke
     volumes:
       - app-data:/app/app-data
       - outputs:/app/outputs
+    network_mode: host
     # deploy.resources block removed
 ```
 
@@ -160,10 +165,10 @@ The pipeline will run on CPU (significantly slower for large datasets).
 ## Local development (no Docker)
 
 ```bash
-# Backend + frontend dev server
-cd backend && uvicorn main:app --host 0.0.0.0 --port 8030 &
-cd frontend && npm run dev          # proxies API calls to localhost:8030
+# Pipeline server
+cd pipeline_server
+uvicorn pipeline_server:app --host 0.0.0.0 --port 7000
 
-# Pipeline (in same Python env, no PIPELINE_API_URL needed)
-python run_pipeline.py --raw-file app-data/data.csv --crop Cotton --model ...
+# Frontend dev server (in a separate terminal)
+cd frontend && npm run dev   # proxies /api calls to localhost:7000
 ```
