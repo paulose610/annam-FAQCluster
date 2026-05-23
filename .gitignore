@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 .eggs/
+.ipynb_checkpoints/
 
 # Virtual environment
 venv/
@@ -17,6 +18,7 @@ env/
 data/
 outputs/
 app-data/
+pipeline_server/app-data/
 
 # Secrets
 .env
@@ -27,7 +29,22 @@ app-data/
 .idea/
 *.swp
 
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
 # Frontend
-frontend/node_modules/                                          
-frontend/dist/                                                  
-frontend/.env.local
+frontend/
+faq-pop-frontend/
+
+# Claude tool memory
+.claude/
+
+# Logs & temp
+*.log
+*.tmp
+
+
+#extras
+modulaize_plan/
+tests/
