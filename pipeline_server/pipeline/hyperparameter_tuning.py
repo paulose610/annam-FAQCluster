@@ -33,7 +33,7 @@ from sklearn.neighbors import KNeighborsClassifier
 # Configuration
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-OUTPUT_DIR = PROJECT_ROOT / 'outputs' / 'hyperparameter_tuning'
+OUTPUT_DIR = PROJECT_ROOT / 'app-data' / 'outputs' / 'hyperparameter_tuning'
 
 
 class ClusteringConfig:

@@ -39,7 +39,7 @@ import logging
 
 SCRIPT_DIR   = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-REPAIR_BASE  = PROJECT_ROOT / 'outputs' / 'repair'
+REPAIR_BASE  = PROJECT_ROOT / 'app-data' / 'outputs' / 'repair'
 
 sys.path.insert(0, str(SCRIPT_DIR))
 # Import needed for pickle deserialization of ClusteringResult

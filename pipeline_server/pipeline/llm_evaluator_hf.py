@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent
-OUTPUT_DIR = PROJECT_ROOT / 'outputs' / 'hyperparameter_tuning'
+OUTPUT_DIR = PROJECT_ROOT / 'app-data' / 'outputs' / 'hyperparameter_tuning'
 
 # ClusteringResult must be importable when unpickling phase1_results.pkl
 import sys as _sys
