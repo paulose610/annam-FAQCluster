@@ -1,3 +1,4 @@
+import os
 import requests
 import pandas as pd
 import re
@@ -21,7 +22,7 @@ def gemma_4_26b_it_completion(prompt, max_tokens=512, temperature=0.0, top_p=0.9
     Returns:
         str: The model's generated text completion.
     """
-    api_url = "http://100.100.108.44:8013/v1/chat/completions"
+    api_url = os.environ.get("GEMMA_API_URL", "http://100.100.108.44:8013/v1/chat/completions")
     headers = {"Content-Type": "application/json"}
     data = {
         "model": "google/gemma-4-26B-A4B-it",

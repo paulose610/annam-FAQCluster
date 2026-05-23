@@ -2,7 +2,7 @@ name: Build & Push Pipeline Image
 
 on:
   push:
-    branches: [main]
+    branches: [main, server]
     paths:
       - "pipeline_server/**"
 

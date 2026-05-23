@@ -9,6 +9,7 @@ services:
       - "8031"
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - GEMMA_API_URL=http://100.100.108.44:8013/v1/chat/completions
     volumes:
       - app-data:/app/app-data
       - outputs:/app/outputs

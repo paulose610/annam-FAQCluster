@@ -18,6 +18,7 @@ The script is also importable:
     run_qa_generation(input_csv, output_csv, crop, model_path, ...)
 """
 
+import os
 import pandas as pd
 import re
 import argparse
@@ -305,7 +306,7 @@ def parse_text_response(text: str):
 # Core Generation Logic (importable)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_API_URL   = "http://100.100.108.44:8013/v1/chat/completions"
+_API_URL   = os.environ.get("GEMMA_API_URL", "http://100.100.108.44:8013/v1/chat/completions")
 _API_MODEL = "google/gemma-4-26B-A4B-it"
 
 

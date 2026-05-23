@@ -9,6 +9,7 @@ Usage:
         --top-k 15 --batch-size 8
 """
 
+import os
 import pandas as pd
 import numpy as np
 import argparse
@@ -28,7 +29,7 @@ _sys.path.insert(0, str(SCRIPT_DIR))
 from hyperparameter_tuning import ClusteringResult, ClusteringConfig  # noqa: F401
 
 
-_API_URL   = "http://100.100.108.44:8013/v1/chat/completions"
+_API_URL   = os.environ.get("GEMMA_API_URL", "http://100.100.108.44:8013/v1/chat/completions")
 _API_MODEL = "google/gemma-4-26B-A4B-it"
 _SYSTEM_PROMPT = (
     "You are an agricultural question clustering expert. "

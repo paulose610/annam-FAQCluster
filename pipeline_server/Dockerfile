@@ -1,6 +1,6 @@
 # Pipeline container — heavy ML deps (PyTorch, vLLM, HDBSCAN, UMAP, transformers)
 # Exposes the full FAQ API (pipeline_server.py) on port 8031.
-FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+FROM python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -14,6 +14,7 @@ COPY requirements.lock .
 RUN pip install --no-cache-dir -r requirements.lock
 
 # Copy pipeline code
+COPY crops.yaml           .
 COPY pipeline/            pipeline/
 COPY pre_pipeline/        pre_pipeline/
 COPY post_pipeline/       post_pipeline/
