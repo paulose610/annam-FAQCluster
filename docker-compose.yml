@@ -1,37 +1,25 @@
 services:
 
-  webapp:
-    image: faqcluster-webapp:local
-    ports:
-      - "8030:8030"        # Only this port is exposed to the outside world
-    environment:
-      - PIPELINE_API_URL=http://pipeline:7000
-      - POP_WORK_DIR=/app/POP_Work
-    volumes:
-      - app-data:/app/app-data
-      - outputs:/app/outputs
-      - pop-work:/app/POP_Work
-    depends_on:
-      pipeline:
-        condition: service_healthy
-    restart: unless-stopped
-
   pipeline:
-    image: faqcluster-pipeline:local
+    image: vicharanashala/faqcluster-pipeline:latest
+    build:
+      context: ./pipeline_server
+      dockerfile: Dockerfile
     expose:
-      - "7000"             # Internal only — not reachable from outside the VM
+      - "8031"
     environment:
       - CUDA_VISIBLE_DEVICES=0
     volumes:
       - app-data:/app/app-data
       - outputs:/app/outputs
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7000/')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8031/')"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    network_mode: host
     deploy:
       resources:
         reservations:
@@ -40,7 +28,21 @@ services:
               count: 1
               capabilities: [gpu]
 
+  frontend:
+    image: vicharanashala/faqcluster-frontend:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "8030:80"
+    environment:
+      - FAQ_API_URL=http://<pipeline-tailscale-ip>:8031
+      - POP_API_URL=http://<pop-server-tailscale-ip>:8032
+    depends_on:
+      pipeline:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   app-data:
   outputs:
-  pop-work:
