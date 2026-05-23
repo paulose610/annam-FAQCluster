@@ -4,18 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "pipeline/**"
-      - "pre_pipeline/**"
-      - "post_pipeline/**"
-      - "run_pipeline.py"
-      - "run_full.py"
-      - "run_pre_pipeline.py"
-      - "run_post_pipeline.py"
-      - "_job_ctl.py"
-      - "config/**"
-      - "pipeline_server.py"
-      - "Dockerfile.pipeline"
-      - "requirements.txt"
+      - "pipeline_server/**"
 
 jobs:
   build-and-push:
@@ -37,8 +26,8 @@ jobs:
       - name: Build and push pipeline image
         uses: docker/build-push-action@v5
         with:
-          context: .
-          file: Dockerfile.pipeline
+          context: ./pipeline_server
+          file: pipeline_server/Dockerfile
           push: true
           tags: |
             vicharanashala/faqcluster-pipeline:latest
