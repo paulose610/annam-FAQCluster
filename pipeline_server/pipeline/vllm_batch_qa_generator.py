@@ -20,6 +20,7 @@ The script is also importable:
 
 import pandas as pd
 import re
+import json
 import argparse
 import sys
 import time
@@ -214,9 +215,12 @@ If the farmer question is clearly about any of these, you MUST return a JSON wit
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📌 CRITICAL FIDELITY RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Stay strictly grounded in the provided "Representative Question".
-- Expand into a comprehensive guide, but do NOT change the technical meaning.
-- Do NOT hallucinate crop names, chemical names, or dosages.
+The "Cluster Topic" in the user request is the AUTHORITATIVE subject for this FAQ entry.
+- Generate the QUESTION and ANSWER strictly about the Cluster Topic.
+- Use the "Representative Question" only for phrasing cues (how the farmer asked it).
+- If the Representative Question is vague, misspelled, or about a different crop/topic, reframe it to match the Cluster Topic exactly.
+- Do NOT hallucinate crop names, chemical names, variety names, or dosages.
+- Do NOT expand the scope beyond what the Cluster Topic specifies.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🌱 CROP EXPERT HINTS — {crop_name.upper()}
@@ -234,7 +238,7 @@ The final output (CATEGORY, QUESTION, and ANSWER) MUST be written EXCLUSIVELY in
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📝 GENERATION GUIDELINES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. **QUESTION**: Rewrite in clear, professional English. Retain agronomic intent. Translate to English if original is in another language.
+1. **QUESTION**: reframe the question in english. DO NOT ADD/OMIT technical details here; just focus on making it a clear, concise question.
 2. **ANSWER (200–400 words)**:
    - Must be written entirely in English.
    - Step-by-step technical guide using clear headings or bullet points.
@@ -270,11 +274,23 @@ def parse_text_response(text: str):
     if not text or not isinstance(text, str):
         return None, "Invalid input"
 
-    # Remove markdown code blocks if the model wraps output
+    # Strip markdown code fences (any language tag: ```json, ```text, ```markdown, etc.)
     cleaned = re.sub(
-        r"^```(?:markdown|text)?\s*|\s*```$", "",
+        r"^```[a-zA-Z]*\s*|\s*```$", "",
         text.strip(), flags=re.DOTALL,
     ).strip()
+
+    # Try JSON parsing first — the model sometimes returns JSON for IRRELEVANT_CROP
+    try:
+        obj = json.loads(cleaned)
+        if isinstance(obj, dict) and "category" in obj:
+            return {
+                "question": str(obj.get("question", obj.get("q", ""))).strip(),
+                "category": str(obj.get("category", "Other")).strip(),
+                "answer":   str(obj.get("answer",   "")).strip(),
+            }, None
+    except (json.JSONDecodeError, ValueError):
+        pass
 
     # Regex extraction based on headers
     c_match = re.search(
@@ -290,13 +306,17 @@ def parse_text_response(text: str):
         cleaned, re.IGNORECASE | re.DOTALL,
     )
 
-    cat = c_match.group(1).strip() if c_match else "Other"
-    q = q_match.group(1).strip() if q_match else ""
-    ans = a_match.group(1).strip() if a_match else cleaned
-
     # If no headers found at all, flag as parse error
     if not c_match and not q_match and not a_match:
         return {"question": "", "category": "PARSE_ERROR", "answer": cleaned}, None
+
+    # Strip bold markdown markers (**) the model sometimes wraps around category/answer
+    cat = re.sub(r'^\*+\s*|\s*\*+$', '', c_match.group(1).strip()) if c_match else "Other"
+    q   = q_match.group(1).strip() if q_match else ""
+    ans = a_match.group(1).strip() if a_match else cleaned
+
+    # Strip leading bold/asterisk artifact lines from the answer (e.g. "**\n", "** \n")
+    ans = re.sub(r'^\*{1,3}\s*\n+', '', ans).strip()
 
     return {"question": q, "category": cat, "answer": ans}, None
 
@@ -305,8 +325,18 @@ def parse_text_response(text: str):
 # Core Generation Logic (importable)
 # ══════════════════════════════════════════════════════════════════════════════
 
-_API_URL   = "http://100.100.108.44:8013/v1/chat/completions"
-_API_MODEL = "google/gemma-4-26B-A4B-it"
+import os as _os
+from pathlib import Path as _Path
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).resolve().parents[2] / ".env", override=True)
+except ImportError:
+    pass
+
+_API_URL            = _os.environ.get("LLM_API_URL",   "http://100.100.108.44:8013/v1/chat/completions")
+_API_MODEL          = _os.environ.get("LLM_MODEL",     "google/gemma-4-26B-A4B-it")
+_API_KEY            = _os.environ.get("LLM_API_KEY",   "")
+_DISABLE_THINKING   = _os.environ.get("LLM_DISABLE_THINKING", "").lower() == "true"
 
 
 def _call_api(session, messages: list, max_tokens: int = 4000) -> str:
@@ -315,25 +345,33 @@ def _call_api(session, messages: list, max_tokens: int = 4000) -> str:
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": 0.0,
+        **( {"thinking": {"type": "disabled"}} if _DISABLE_THINKING else {} ),
     }
+    if _API_KEY:
+        session.headers.update({"Authorization": f"Bearer {_API_KEY}"})
     resp = session.post(_API_URL, json=payload, timeout=120)
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    msg = resp.json()["choices"][0]["message"]
+    return (msg.get("content") or msg.get("reasoning_content") or "").strip()
 
 
-_WORKERS = 16  # concurrent API calls; vLLM queues extras automatically
+_WORKERS = int(_os.environ.get("LLM_STAGE5_WORKERS", "16"))  # concurrent API calls; vLLM queues extras automatically
 
 
 def _process_row(args):
     """Process a single row; returns (index, question, category, answer)."""
     import requests as _requests
     i, row, system_prompt, crop, prefix = args
-    question = row.get('QueryText', row.get('representative_question', 'N/A'))
-    freq = row.get('count', row.get('raw_frequency', 1))
+    question      = row.get('QueryText', row.get('representative_question', 'N/A'))
+    freq          = row.get('count', row.get('raw_frequency', 1))
+    cluster_label = str(row.get('cluster_label', '')).strip()
     user_msg = prefix + f"""
 Generate a {crop} FAQ entry based on:
+- Cluster Topic: {cluster_label}
 - Representative Question: {question}
 - Freq: {freq}
+
+The "Cluster Topic" is the authoritative subject. Reframe the "Representative Question" to match the Cluster Topic if they differ.
 """
     messages = [
         {"role": "system", "content": system_prompt},
