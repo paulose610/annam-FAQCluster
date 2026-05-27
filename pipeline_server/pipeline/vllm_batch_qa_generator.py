@@ -18,6 +18,7 @@ The script is also importable:
     run_qa_generation(input_csv, output_csv, crop, model_path, ...)
 """
 
+import os
 import pandas as pd
 import re
 import json

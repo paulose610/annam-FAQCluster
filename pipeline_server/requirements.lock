@@ -183,6 +183,12 @@ pyyaml==6.0.3
     #   uvicorn
 rapidfuzz==3.14.5
     # via faqcluster-pipeline (pyproject.toml)
+requests==2.32.3
+    # via faqcluster-pipeline (pyproject.toml)
+charset-normalizer==3.4.2
+    # via requests
+urllib3==2.4.0
+    # via requests
 regex==2026.5.9
     # via transformers
 rich==15.0.0
