@@ -216,9 +216,7 @@ If the farmer question is clearly about any of these, you MUST return a JSON wit
 📌 CRITICAL FIDELITY RULE
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 The "Cluster Topic" in the user request is the AUTHORITATIVE subject for this FAQ entry.
-- Generate the QUESTION and ANSWER strictly about the Cluster Topic.
-- Use the "Representative Question" only for phrasing cues (how the farmer asked it).
-- If the Representative Question is vague, misspelled, or about a different crop/topic, reframe it to match the Cluster Topic exactly.
+- Generate the ANSWER strictly about the Cluster Topic.
 - Do NOT hallucinate crop names, chemical names, variety names, or dosages.
 - Do NOT expand the scope beyond what the Cluster Topic specifies.
 
@@ -238,7 +236,10 @@ The final output (CATEGORY, QUESTION, and ANSWER) MUST be written EXCLUSIVELY in
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📝 GENERATION GUIDELINES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-1. **QUESTION**: reframe the question in english. DO NOT ADD/OMIT technical details here; just focus on making it a clear, concise question.
+1. **QUESTION**: Translate the "Representative Question" into formal English ONLY.
+   - DO NOT add, remove, or change any information or detail present in the original.
+   - DO NOT expand it, rephrase the meaning, or align it to the Cluster Topic.
+   - The ONLY allowed change is: translate to formal English. Nothing else.
 2. **ANSWER (200–400 words)**:
    - Must be written entirely in English.
    - Step-by-step technical guide using clear headings or bullet points.
@@ -259,7 +260,7 @@ Output EXACTLY in this format with these three headers.
 Even if the user query is in Hindi, the response below MUST be in ENGLISH.
 
 CATEGORY: [Classification]
-QUESTION: [The polished English question]
+QUESTION: [Formal English translation of the Representative Question — no additions]
 ANSWER:
 [The detailed technical answer in English...]
 """
@@ -313,6 +314,8 @@ def parse_text_response(text: str):
     # Strip bold markdown markers (**) the model sometimes wraps around category/answer
     cat = re.sub(r'^\*+\s*|\s*\*+$', '', c_match.group(1).strip()) if c_match else "Other"
     q   = q_match.group(1).strip() if q_match else ""
+    # Strip "ANSWER:" that leaked onto the question line (model put ANSWER: on same line as QUESTION:)
+    q   = re.sub(r'^ANSWER\s*:?\s*', '', q, flags=re.IGNORECASE).strip()
     ans = a_match.group(1).strip() if a_match else cleaned
 
     # Strip leading bold/asterisk artifact lines from the answer (e.g. "**\n", "** \n")
@@ -352,7 +355,7 @@ def _call_api(session, messages: list, max_tokens: int = 4000) -> str:
     resp = session.post(_API_URL, json=payload, timeout=120)
     resp.raise_for_status()
     msg = resp.json()["choices"][0]["message"]
-    return (msg.get("content") or msg.get("reasoning_content") or "").strip()
+    return (msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or "").strip()
 
 
 _WORKERS = int(_os.environ.get("LLM_STAGE5_WORKERS", "16"))  # concurrent API calls; vLLM queues extras automatically
@@ -365,9 +368,13 @@ def _process_row(args):
     question      = row.get('QueryText', row.get('representative_question', 'N/A'))
     freq          = row.get('count', row.get('raw_frequency', 1))
     cluster_label = str(row.get('cluster_label', '')).strip()
+    answer_label  = str(row.get('answer_label',  '')).strip()
+    # answer_label is the specific answer-distinct topic from unique_question_finder;
+    # cluster_label is the broader cluster topic — use answer_label when available.
+    topic = answer_label if answer_label and answer_label != cluster_label else cluster_label
     user_msg = prefix + f"""
 Generate a {crop} FAQ entry based on:
-- Cluster Topic: {cluster_label}
+- Cluster Topic: {topic}
 - Representative Question: {question}
 - Freq: {freq}
 

@@ -203,7 +203,7 @@ class RepairJudge(LocalHFJudge):
             f"Integers only — no objects, no strings. "
             f'Example: {{"off": [2, 5, 7]}}. Empty list if all are about {crop}.\nJSON:'
         )
-        raw  = self._gen_long(prompt, max_new_tokens=80)
+        raw  = self._gen_long(prompt, max_new_tokens=300)
         data = self._parse_json_obj(raw)
         off  = data.get("off", [])
         safe = [_safe_int(i) for i in off]

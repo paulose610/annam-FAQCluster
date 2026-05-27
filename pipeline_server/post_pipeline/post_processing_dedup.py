@@ -47,7 +47,7 @@ def llm_completion(prompt, max_tokens=200, temperature=0.0, top_p=0.95, stop=Non
     response = requests.post(_API_URL, headers=headers, json=data)
     if response.status_code == 200:
         msg = response.json()['choices'][0]['message']
-        return msg.get('content') or msg.get('reasoning_content') or ""
+        return msg.get('content') or msg.get('reasoning') or msg.get('reasoning_content') or ""
     else:
         raise RuntimeError(f"Failed to fetch completion: {response.status_code} - {response.text}")
 
@@ -132,6 +132,15 @@ def deduplicate_and_aggregate(df, text_col='Generated_Question', batch_size=100,
     """
     df['raw_frequency'] = pd.to_numeric(df['raw_frequency'], errors='coerce').fillna(0)
 
+    # Drop rows where QA generation failed or was out of scope before dedup
+    n_before = len(df)
+    bad_cats = {'PARSE_ERROR', 'IRRELEVANT_CROP'}
+    df = df[~df['Generated_Category'].isin(bad_cats)].copy()
+    df = df[df[text_col].notna() & (df[text_col].str.strip() != '')].copy()
+    n_dropped = n_before - len(df)
+    if n_dropped:
+        tqdm.write(f"  Filtered {n_dropped} rows (PARSE_ERROR / IRRELEVANT_CROP / empty question) before dedup")
+
     categories = df['Generated_Category'].unique()
     n_workers  = min(len(categories), _CATEGORY_WORKERS)
     tqdm.write(f"Processing {len(categories)} categories with {n_workers} parallel workers "
@@ -197,7 +206,7 @@ def _get_verified_matches(reference_row, candidate_df, text_col, batch_size, ref
             f"Reference:\n{original_id}: {original_question}\n\n"
             f"Candidates:\n{batch_text}\n\nOutput:"
         )
-        response = llm_completion(prompt, max_tokens=200, temperature=0.0)
+        response = llm_completion(prompt, max_tokens=500, temperature=0.0)
         m = re.search(r'\[.*\]', response, re.DOTALL)
         if m:
             try:
@@ -247,7 +256,7 @@ def _get_verified_matches(reference_row, candidate_df, text_col, batch_size, ref
         f"Reference:\n{original_id}: {original_question}\n\n"
         f"Candidates to Verify:\n{verification_text}\n\nOutput:"
     )
-    verification_response = llm_completion(verification_prompt, max_tokens=200, temperature=0.0)
+    verification_response = llm_completion(verification_prompt, max_tokens=500, temperature=0.0)
 
     final_matched_ids = []
     final_match = re.search(r'\[.*\]', verification_response, re.DOTALL)

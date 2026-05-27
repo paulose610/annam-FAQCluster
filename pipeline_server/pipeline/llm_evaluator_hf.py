@@ -76,7 +76,7 @@ class LocalHFJudge:
     # Core generation
     # ------------------------------------------------------------------
 
-    def _call_api(self, user_text: str, max_tokens: int = 10,
+    def _call_api(self, user_text: str, max_tokens: int = 300,
                   system_prompt: str = _SYSTEM_PROMPT) -> str:
         messages = []
         if system_prompt:
@@ -94,7 +94,7 @@ class LocalHFJudge:
                 resp = self._session.post(_API_URL, json=payload, timeout=120)
                 resp.raise_for_status()
                 msg = resp.json()["choices"][0]["message"]
-                text = msg.get("content") or msg.get("reasoning_content") or ""
+                text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
                 return text.strip()
             except Exception as e:
                 if attempt == 2:
@@ -103,7 +103,7 @@ class LocalHFJudge:
                 time.sleep(5 * (attempt + 1))
 
     def _generate_one(self, user_text: str) -> str:
-        return self._call_api(user_text, max_tokens=20)
+        return self._call_api(user_text, max_tokens=300)
 
     def _generate_batch(self, user_texts: list[str]) -> list[str]:
         with ThreadPoolExecutor(max_workers=min(len(user_texts), 16)) as pool:
